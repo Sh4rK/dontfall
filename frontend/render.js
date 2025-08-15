@@ -24,6 +24,11 @@ export class Renderer {
     this._v = new THREE.Vector3();
     this._s = new THREE.Vector3(1,1,1);
 
+    // Tile colors
+    this.baseTileColor = new THREE.Color(0xe7ecf7);
+    this.redTileColor = new THREE.Color(0xff0000);
+    this._colTmp = new THREE.Color();
+
     this._onResize = () => this.resize();
   }
 
@@ -44,6 +49,8 @@ export class Renderer {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
+    // Ensure correct color space for vibrant colors
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.container.appendChild(this.renderer.domElement);
 
     // Lights
@@ -52,14 +59,32 @@ export class Renderer {
     dir.position.set(1, 2, 1);
     this.scene.add(dir);
 
-    // Tiles Instanced
+    // Tiles (individual meshes to ensure reliable per-tile colors)
     const tileGeom = new THREE.BoxGeometry(TS * 0.96, 0.12, TS * 0.96);
-    const tileMat = new THREE.MeshStandardMaterial({ color: 0xe7ecf7, roughness: 0.9, metalness: 0.0 });
     this.tileCount = W * H;
-    this.tileMesh = new THREE.InstancedMesh(tileGeom, tileMat, this.tileCount);
-    this.tileMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.scene.add(this.tileMesh);
-
+    this.tiles = new Array(this.tileCount);
+    this.tileGroup = new THREE.Group();
+    for (let ty = 0; ty < H; ty++) {
+      for (let tx = 0; tx < W; tx++) {
+        const idx = ty * W + tx;
+        const mat = new THREE.MeshStandardMaterial({
+          color: this.baseTileColor.clone(),
+          roughness: 0.9,
+          metalness: 0.0,
+          emissive: 0x222222
+        });
+        const mesh = new THREE.Mesh(tileGeom, mat);
+        const x = (tx + 0.5 - this.tileGrid.halfW) * TS;
+        const z = (ty + 0.5 - this.tileGrid.halfH) * TS;
+        mesh.position.set(x, 0, z);
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        this.tiles[idx] = mesh;
+        this.tileGroup.add(mesh);
+      }
+    }
+    this.scene.add(this.tileGroup);
+ 
     // Local player arrow
     const coneGeom = new THREE.ConeGeometry(TS * 0.25, TS * 0.6, 16);
     const coneMat = new THREE.MeshStandardMaterial({ color: 0xff3b30, emissive: 0x550000, roughness: 0.6 });
@@ -140,30 +165,27 @@ export class Renderer {
   frame(nowMs, displayPlayers, tilesModel, arrowVisible, selfId, constants) {
     if (!this.renderer || !this.camera) return;
 
-    // Update tiles instanced transforms
-    if (this.tileMesh && tilesModel) {
+    // Update tiles (positions and colors)
+    if (this.tileGroup && this.tiles && tilesModel) {
       const { width, height, halfW, halfH, size } = this.tileGrid;
       const amp = constants.TILE_SHAKE_AMPLITUDE ?? 0.05;
       const freq = constants.TILE_SHAKE_FREQUENCY_HZ ?? 10;
-      // tile fall handled with speed-based drop
-
+ 
       for (let ty = 0; ty < height; ty++) {
         for (let tx = 0; tx < width; tx++) {
           const idx = ty * width + tx;
           const st = tilesModel.state[idx]; // 0 solid, 1 shaking, 2 fallen
           const shakeStart = tilesModel.shakeStart[idx] || 0;
           const fallStart = tilesModel.fallStart[idx] || 0;
-
-          // Base position
+ 
           const x = (tx + 0.5 - halfW) * size;
           const z = (ty + 0.5 - halfH) * size;
           let y = 0;
-
+ 
           if (st === 1) {
             const t = (nowMs - shakeStart) / 1000;
             y += amp * Math.sin(t * freq * Math.PI * 2);
           } else if (st === 2) {
-            // Fall far down quickly, then cull by sending far below frustum
             const elapsed = Math.max(0, nowMs - fallStart);
             const fallSpeed = 30; // units/sec
             const maxDrop = 80;   // units to fall before culling
@@ -171,13 +193,23 @@ export class Renderer {
             if (drop > maxDrop) drop = 1000; // place far below camera far plane
             y -= drop;
           }
-
-          this._v.set(x, y, z);
-          this._tmpMat.compose(this._v, this._qIdent, this._s);
-          this.tileMesh.setMatrixAt(idx, this._tmpMat);
+ 
+          const mesh = this.tiles[idx];
+          mesh.position.set(x, y, z);
+ 
+          // Tile color: fade to red while shaking, fully red when fallen
+          if (st === 0) {
+            mesh.material.color.copy(this.baseTileColor);
+          } else if (st === 1) {
+            const dur = (constants.TILE_SHAKE_COLOR_FADE_SEC ?? 1.2);
+            const tsec = Math.max(0, (nowMs - shakeStart) / 1000);
+            const f = Math.max(0, Math.min(1, tsec / dur));
+            mesh.material.color.copy(this.baseTileColor).lerp(this.redTileColor, f);
+          } else {
+            mesh.material.color.copy(this.redTileColor);
+          }
         }
       }
-      this.tileMesh.instanceMatrix.needsUpdate = true;
     }
 
     // Update players
