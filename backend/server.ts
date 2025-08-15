@@ -1,203 +1,383 @@
-// dontfall/backend/server.ts
-//
-// Entry point for the Deno backend. It serves static files from the
-// `frontend/` directory, upgrades `/ws` requests to WebSocket, and runs
-// the game simulation loop.
-//
-// The implementation follows the design described in SPEC.md and uses
-// the `Game` class defined in `game.ts`.
-//
-// Note: This file assumes Deno v1.38+ (standard library APIs only).
+declare const Deno: any;
+// Deno HTTP + WebSocket server for Don't Fall
 
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { Game } from "./game.ts";
-import { CONFIG } from "./config.ts";
-import type {
-  InputMessage,
-  ServerMessage,
-} from "./types.ts";
+import {
+  CONSTANTS,
+  COUNTDOWN_SECONDS,
+  HTTP_PORT,
+  INPUT_RATE_LIMIT_PER_SEC,
+  MAP_HEIGHT,
+  MAP_WIDTH,
+  STATE_SNAPSHOT_RATE,
+  TICK_RATE,
+} from "./config.ts";
+import { GameRoom } from "./game.ts";
+import type { ClientMessage } from "./messages.ts";
+import { parseClientMessage } from "./messages.ts";
+import type { Player } from "./types.ts";
+import { createTickLoop, nowMs } from "./utils/time.ts";
 
-// -----------------------------------------------------------------------------
-// Global state
-// -----------------------------------------------------------------------------
+// --------- Static file serving ---------
 
-// Single default room (the spec only requires one room).
-const room = new Game("default");
+const FRONTEND_DIR = "frontend";
 
-// Map each active WebSocket to its player ID.
-const socketToPlayer = new Map<WebSocket, string>();
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".wasm": "application/wasm",
+  ".ico": "image/x-icon",
+};
 
-// -----------------------------------------------------------------------------
-// Helper utilities
-// -----------------------------------------------------------------------------
-
-/**
- * Determine a simple Content-Type header based on file extension.
- */
-function contentType(path: string): string {
-  if (path.endsWith(".html")) return "text/html; charset=utf-8";
-  if (path.endsWith(".js")) return "application/javascript; charset=utf-8";
-  if (path.endsWith(".css")) return "text/css; charset=utf-8";
-  if (path.endsWith(".json")) return "application/json; charset=utf-8";
-  if (path.endsWith(".png")) return "image/png";
-  if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
-  return "application/octet-stream";
+function extname(path: string): string {
+  const i = path.lastIndexOf(".");
+  return i >= 0 ? path.slice(i) : "";
 }
 
-/**
- * Broadcast a server message to all connected clients.
- */
-function broadcast(msg: ServerMessage) {
-  const payload = JSON.stringify(msg);
-  for (const ws of socketToPlayer.keys()) {
-    try {
-      ws.send(payload);
-    } catch {
-      // ignore send errors – the socket will be cleaned up on close.
-    }
-  }
-}
+async function serveStatic(req: Request): Promise<Response | null> {
+  const url = new URL(req.url);
+  let rel = decodeURIComponent(url.pathname);
+  if (rel === "/") rel = "/index.html";
+  const diskPath = `${FRONTEND_DIR}${rel}`;
 
-/**
- * Send a welcome packet to a newly connected client.
- */
-function sendWelcome(ws: WebSocket, playerId: string) {
-  const welcome: ServerMessage = {
-    type: "welcome",
-    playerId,
-    roomId: room.state.id,
-    constants: CONFIG,
-    mapSeed: room.state.mapSeed,
-    mapSize: { width: CONFIG.MAP_WIDTH, height: CONFIG.MAP_HEIGHT },
-  };
-  ws.send(JSON.stringify(welcome));
-}
-
-/**
- * Process a parsed JSON message coming from a client.
- */
-function handleClientMessage(ws: WebSocket, data: unknown) {
-  if (typeof data !== "object" || data === null) return;
-  const msg = data as Record<string, unknown>;
-  const type = msg.type as string | undefined;
-  const playerId = socketToPlayer.get(ws);
-  if (!playerId) return; // should never happen
-
-  switch (type) {
-    case "join": {
-      const name = (msg.name as string) ?? "";
-      const color = (msg.color as string) ?? "#ffffff";
-      // Update stored player info.
-      const player = room.state.players.get(playerId);
-      if (player) {
-        player.name = name;
-        player.color = color;
-      }
-      break;
-    }
-    case "ready": {
-      const ready = Boolean(msg.ready);
-      const player = room.state.players.get(playerId);
-      if (player) player.ready = ready;
-      // Let the room know we may need to start the countdown.
-      // The Game class checks lobby readiness on each tick.
-      break;
-    }
-    case "input": {
-      const input = msg as InputMessage;
-      room.enqueueInput(playerId, input);
-      break;
-    }
-    case "pong":
-      // No action needed – could be used for latency measurement.
-      break;
-    default:
-      // Unknown message type – ignore.
-      break;
-  }
-}
-
-/**
- * Clean up state when a client disconnects.
- */
-function handleDisconnect(ws: WebSocket) {
-  const playerId = socketToPlayer.get(ws);
-  if (playerId) {
-    room.removePlayer(playerId);
-    socketToPlayer.delete(ws);
-  }
-}
-
-// -----------------------------------------------------------------------------
-// HTTP request handler
-// -----------------------------------------------------------------------------
-
-async function handler(req: Request): Promise<Response> {
-  const { pathname } = new URL(req.url);
-
-  // WebSocket endpoint.
-  if (pathname === "/ws") {
-    const { socket, response } = Deno.upgradeWebSocket(req);
-    socket.onopen = () => {
-      // Create a new player for this connection.
-      const playerId = crypto.randomUUID();
-      socketToPlayer.set(socket, playerId);
-      room.addPlayer(playerId, "", "#ffffff");
-      sendWelcome(socket, playerId);
-    };
-    socket.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        handleClientMessage(socket, data);
-      } catch (e) {
-        console.error("Failed to parse client message:", e);
-      }
-    };
-    socket.onclose = () => handleDisconnect(socket);
-    socket.onerror = (e) => {
-      console.error("WebSocket error:", e);
-      handleDisconnect(socket);
-    };
-    return response;
-  }
-
-  // Serve static assets from ./frontend.
-  // Default to index.html for the root path.
-  let filePath = pathname === "/" ? "/index.html" : pathname;
-  // Prevent directory traversal.
-  if (filePath.includes("..")) {
-    return new Response("Invalid path", { status: 400 });
-  }
-
-  const fullPath = `${Deno.cwd()}/frontend${filePath}`;
   try {
-    const file = await Deno.readFile(fullPath);
-    return new Response(file, {
-      status: 200,
-      headers: { "content-type": contentType(filePath) },
-    });
+    const file = await Deno.readFile(diskPath);
+    const ext = extname(diskPath).toLowerCase();
+    const ct = CONTENT_TYPES[ext] ?? "application/octet-stream";
+    return new Response(file, { status: 200, headers: { "content-type": ct } });
   } catch {
-    return new Response("Not Found", { status: 404 });
+    return null;
   }
 }
 
-// -----------------------------------------------------------------------------
-// Game loop
-// -----------------------------------------------------------------------------
+// --------- Room manager ---------
 
-// Run the simulation at the configured tick rate.
-const tickIntervalMs = 1000 / CONFIG.TICK_RATE;
-setInterval(() => {
-  room.tick();
+type ClientId = string;
 
-  // Broadcast the latest state snapshot to all clients.
-  const stateMsg = room.getLatestState();
-  if (stateMsg) broadcast(stateMsg);
-}, tickIntervalMs);
+interface ClientConn {
+  id: ClientId;
+  ws: WebSocket;
+  name?: string;
+  color?: string;
+  joined: boolean;
+  inputWindowStart: number; // ms
+  inputCount: number;
+}
 
-// -----------------------------------------------------------------------------
-// Start the HTTP server
-// -----------------------------------------------------------------------------
+interface RoomContext {
+  id: string;
+  room: GameRoom;
+  clients: Map<ClientId, ClientConn>;
+  tickLoopStarted: boolean;
+  stateLoopStarted: boolean;
+  tickLoop: ReturnType<typeof createTickLoop>;
+  stateLoop: ReturnType<typeof createTickLoop>;
+  lastRoundState: "lobby" | "countdown" | "inRound" | "roundOver";
+}
 
-console.log(`Server listening on http://localhost:8000`);
-await serve(handler, { port: 8000 });
+const rooms = new Map<string, RoomContext>();
+
+function getOrCreateRoom(roomId: string): RoomContext {
+  let ctx = rooms.get(roomId);
+  if (ctx) return ctx;
+
+  const room = new GameRoom(roomId);
+  const ctxNew: RoomContext = {
+    id: roomId,
+    room,
+    clients: new Map(),
+    tickLoopStarted: false,
+    stateLoopStarted: false,
+    tickLoop: createTickLoop(TICK_RATE, ({ now, dt }) => {
+      // dt is fixed ms per tick; pass through
+      room.tick(now, dt);
+      handleRoomTransitions(ctxNew, now);
+    }),
+    stateLoop: createTickLoop(STATE_SNAPSHOT_RATE, () => {
+      broadcastSnapshot(ctxNew);
+    }),
+    lastRoundState: "lobby",
+  };
+  rooms.set(roomId, ctxNew);
+  return ctxNew;
+}
+
+function startLoopsIfNeeded(ctx: RoomContext) {
+  if (!ctx.tickLoopStarted) {
+    ctx.tickLoop.start();
+    ctx.tickLoopStarted = true;
+  }
+  if (!ctx.stateLoopStarted) {
+    ctx.stateLoop.start();
+    ctx.stateLoopStarted = true;
+  }
+}
+
+function stopLoopsIfNeeded(ctx: RoomContext) {
+  if (ctx.clients.size === 0) {
+    if (ctx.tickLoopStarted) {
+      ctx.tickLoop.stop();
+      ctx.tickLoopStarted = false;
+    }
+    if (ctx.stateLoopStarted) {
+      ctx.stateLoop.stop();
+      ctx.stateLoopStarted = false;
+    }
+  }
+}
+
+function handleRoomTransitions(ctx: RoomContext, now: number) {
+  const rs = ctx.room.state.roundState;
+  if (ctx.lastRoundState !== rs) {
+    // countdown -> inRound: send round_start
+    if (ctx.lastRoundState === "countdown" && rs === "inRound") {
+      const spawnAssignments = ctx.room.getLastSpawnAssignments();
+      const msg = {
+        type: "round_start",
+        spawnAssignments,
+        mapSeed: ctx.room.state.mapSeed,
+      } as const;
+      broadcast(ctx, msg);
+    }
+
+    // inRound -> roundOver: broadcast results + leaderboard, schedule reset to lobby
+    if (ctx.lastRoundState === "inRound" && rs === "roundOver") {
+      const { placements, winnerId } = ctx.room.computeRoundResults();
+      const roundOver = { type: "round_over", placements, winnerId } as const;
+      broadcast(ctx, roundOver);
+
+      const leaderboard = ctx.room.leaderboardSnapshot();
+      const lbMsg = { type: "leaderboard", entries: leaderboard } as const;
+      broadcast(ctx, lbMsg);
+
+      // Return to lobby after short delay (3.5s)
+      const RESET_DELAY_MS = 3500;
+      setTimeout(() => {
+        ctx.room.resetToLobby();
+        broadcastLobby(ctx);
+      }, RESET_DELAY_MS);
+    }
+
+    ctx.lastRoundState = rs;
+  }
+}
+
+function broadcast(ctx: RoomContext, msg: unknown) {
+  const data = JSON.stringify(msg);
+  for (const c of ctx.clients.values()) {
+    try {
+      c.ws.send(data);
+    } catch {
+      // ignore broken connections; close handler will clean up
+    }
+  }
+}
+
+function broadcastLobby(ctx: RoomContext) {
+  const players = ctx.room.lobbyView();
+  const allReady = players.length >= 2 && players.every((p) => p.ready);
+  const msg = {
+    type: "lobby_state",
+    players,
+    minPlayers: 2,
+    maxPlayers: CONSTANTS.ROOM_MAX_PLAYERS,
+    allReady,
+  } as const;
+  broadcast(ctx, msg);
+}
+
+function broadcastCountdown(ctx: RoomContext) {
+  const msg = {
+    type: "countdown",
+    seconds: COUNTDOWN_SECONDS,
+    serverTime: nowMs(),
+  } as const;
+  broadcast(ctx, msg);
+}
+
+function broadcastSnapshot(ctx: RoomContext) {
+  const snap = ctx.room.buildSnapshotAndClear();
+  const serverTime = nowMs();
+  const tick = ctx.room.state.tick;
+
+  // Send per-client to include lastAckSeq hint
+  for (const c of ctx.clients.values()) {
+    const p = ctx.room.state.players.get(c.id) as Player | undefined;
+    const lastAckSeq = p?.lastInputSeq;
+    const msg = {
+      type: "state",
+      tick,
+      serverTime,
+      players: snap.players,
+      tiles: snap.tiles,
+      events: snap.events,
+      ...(lastAckSeq !== undefined ? { lastAckSeq } : {}),
+    } as const;
+    try {
+      c.ws.send(JSON.stringify(msg));
+    } catch {
+      // ignore; cleanup on close
+    }
+  }
+}
+
+// --------- WebSocket handling ---------
+
+function upgradeWebSocket(req: Request): Response {
+  const { socket, response } = Deno.upgradeWebSocket(req);
+  const url = new URL(req.url);
+  const roomId = url.searchParams.get("roomId")?.trim() || "default";
+  const ctx = getOrCreateRoom(roomId);
+
+  const client: ClientConn = {
+    id: crypto.randomUUID(),
+    ws: socket,
+    joined: false,
+    inputWindowStart: nowMs(),
+    inputCount: 0,
+  };
+
+  ctx.clients.set(client.id, client);
+
+  socket.addEventListener("open", () => {
+    // nothing; wait for join
+  });
+
+  socket.addEventListener("message", (ev: MessageEvent) => {
+    try {
+      const raw = JSON.parse(typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data));
+      const msg = parseClientMessage(raw) as ClientMessage;
+      handleClientMessage(ctx, client, msg);
+    } catch {
+      // Ignore invalid messages
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    // If client had joined, remove from room; mid-round elim is handled by GameRoom.removePlayer
+    if (client.joined) {
+      ctx.room.removePlayer(client.id);
+      broadcastLobby(ctx);
+    }
+    ctx.clients.delete(client.id);
+    stopLoopsIfNeeded(ctx);
+  });
+
+  // Periodic ping (keep-alive and latency)
+  const pingInterval = setInterval(() => {
+    try {
+      socket.send(JSON.stringify({ type: "ping", ts: nowMs() }));
+    } catch {
+      // ignore
+    }
+  }, 5000);
+
+  socket.addEventListener("close", () => clearInterval(pingInterval));
+
+  return response;
+}
+
+function handleClientMessage(ctx: RoomContext, client: ClientConn, msg: ClientMessage) {
+  const now = nowMs();
+
+  switch (msg.type) {
+    case "join": {
+      if (client.joined) break;
+      client.joined = true;
+      client.name = msg.name;
+      client.color = msg.color;
+
+      // Enforce capacity
+      if (ctx.room.state.players.size >= CONSTANTS.ROOM_MAX_PLAYERS) {
+        client.ws.close(1008, "Room full");
+        return;
+      }
+
+      // Add player to room
+      ctx.room.addPlayer(client.id, msg.name, msg.color);
+
+      // Start loops once first player joins
+      startLoopsIfNeeded(ctx);
+
+      // Send welcome
+      const welcome = {
+        type: "welcome",
+        playerId: client.id,
+        roomId: ctx.id,
+        constants: CONSTANTS,
+        mapSeed: ctx.room.state.mapSeed,
+        mapSize: { width: MAP_WIDTH, height: MAP_HEIGHT },
+      } as const;
+      client.ws.send(JSON.stringify(welcome));
+
+      // Broadcast lobby
+      broadcastLobby(ctx);
+      break;
+    }
+
+    case "ready": {
+      if (!client.joined) break;
+      const { allReady } = ctx.room.setReady(client.id, msg.ready);
+      broadcastLobby(ctx);
+      if (allReady && ctx.room.state.roundState === "lobby") {
+        ctx.room.maybeStartCountdown(now);
+      }
+      if (ctx.room.state.roundState === "countdown") {
+        broadcastCountdown(ctx);
+      }
+      break;
+    }
+
+    case "input": {
+      if (!client.joined) break;
+
+      // Rate limiting: sliding 1s window
+      if (now - client.inputWindowStart >= 1000) {
+        client.inputWindowStart = now;
+        client.inputCount = 0;
+      }
+      if (client.inputCount < INPUT_RATE_LIMIT_PER_SEC) {
+        client.inputCount++;
+        ctx.room.handleInput(client.id, msg.seq, msg.move, msg.dash, now);
+      }
+      break;
+    }
+
+    case "pong": {
+      // Optional: latency computation; currently no-op
+      break;
+    }
+  }
+}
+
+// --------- HTTP routes ---------
+
+const serverStart = nowMs();
+
+async function handleRequest(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+
+  if (url.pathname === "/health") {
+    const uptime = nowMs() - serverStart;
+    return new Response(JSON.stringify({ ok: true, uptimeMs: uptime }), {
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  }
+
+  if (url.pathname === "/ws" && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+    return upgradeWebSocket(req);
+  }
+
+  const staticResp = await serveStatic(req);
+  return staticResp ?? new Response("Not Found", { status: 404 });
+}
+
+// --------- Start server ---------
+
+Deno.serve({ port: HTTP_PORT }, handleRequest);

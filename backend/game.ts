@@ -1,95 +1,157 @@
-// dontfall/backend/game.ts
-//
-// Core game simulation for the "Don't Fall" multiplayer arena.
-// This module implements the server‑side tick loop, player
-// movement, dash mechanics, tile shaking/falling, and
-// round state transitions.
-//
-// The implementation follows the design
-// described in SPEC.md and uses the
-// configuration constants from `config.ts`.
-//
-// The module exports a `Game` class that can be
-// instantiated per room and driven by
-// `Game.tick()` from a timer.
-//
-// Types imported from `types.ts` are deliberately
-// simple and JSON‑serializable so they can be
-// sent directly to clients.
+// Core game simulation (server-authoritative)
 
 import {
+  COUNTDOWN_SECONDS,
+  DASH_COOLDOWN_MS,
+  DASH_DURATION_MS,
+  DASH_IMPULSE,
+  DASH_PUSHBACK_IMPULSE,
+  MAP_HEIGHT,
+  MAP_WIDTH,
+  PLAYER_ACCEL,
+  PLAYER_FRICTION,
+  PLAYER_MOVE_SPEED,
+  PLAYER_RADIUS,
+  TILE_FALL_DELAY_MS,
+  TILE_SIZE,
+} from "./config.ts";
+import type {
+  GameEvent,
   Player,
-  PlayerId,
-  Tile,
-  TileState,
+  PlayerSnapshot,
   RoomState,
-  RoundState,
-  InputMessage,
-  ServerMessage,
+  Tile,
+  TileDelta,
+  Vec2,
 } from "./types.ts";
-import * as cfg from "./config.ts";
-import { nowMs } from "./utils/time.ts";
+import { Leaderboard } from "./leaderboard.ts";
 
-/**
- * Helper to compute a linear index from tile coordinates.
- */
-function tileIndex(x: number, y: number): number {
-  return y * cfg.MAP_WIDTH + x;
+// Snapshot data returned to server for broadcast (server will add tick/serverTime/lastAckSeq per-client)
+export interface SnapshotData {
+  players: PlayerSnapshot[];
+  tiles: TileDelta[]; // deltas since last snapshot
+  events: GameEvent[]; // events since last snapshot
 }
 
-/**
- * Helper to convert a linear index to coordinates.
- */
-function indexToCoord(idx: number): { x: number; y: number } {
-  const y = Math.floor(idx / cfg.MAP_WIDTH);
-  const x = idx % cfg.MAP_WIDTH;
-  return { x, y };
+function nowMs(): number {
+  return Date.now();
 }
 
-/**
- * Game class – one instance per room.
- */
-export class Game {
-  /** The mutable state of the room. */
-  public state: RoomState;
+// --- Grid helpers
 
-  /** Timestamp (ms) of the last tick. */
-  private lastTickTime: number = nowMs();
+const HALF_W_TILES = MAP_WIDTH / 2;
+const HALF_H_TILES = MAP_HEIGHT / 2;
 
-  /** Map of playerId -> pending input messages (ordered). */
-  private inputQueue: Map<PlayerId, InputMessage[]> = new Map();
+function tileIndex(tx: number, ty: number): number {
+  return ty * MAP_WIDTH + tx;
+}
 
-  /** Cached snapshot of the last state message sent to clients. */
-  private lastStateMessage: ServerMessage | null = null;
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
 
-  constructor(roomId: string) {
-    this.state = {
-      id: roomId,
-      players: new Map(),
-      tiles: [],
-      roundState: "lobby",
-      leaderboard: new Map(),
-      tick: 0,
-      mapSeed: Math.floor(Math.random() * 1_000_000),
-    };
-    this.initializeTiles();
+function length(v: Vec2): number {
+  return Math.hypot(v.x, v.y);
+}
+function normalize(v: Vec2): Vec2 {
+  const m = length(v);
+  if (m <= 1e-6) return { x: 0, y: 0 };
+  return { x: v.x / m, y: v.y / m };
+}
+function add(a: Vec2, b: Vec2): Vec2 {
+  return { x: a.x + b.x, y: a.y + b.y };
+}
+function sub(a: Vec2, b: Vec2): Vec2 {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+function mul(a: Vec2, s: number): Vec2 {
+  return { x: a.x * s, y: a.y * s };
+}
+
+function posToTile(pos: Vec2): { tx: number; ty: number } | null {
+  const fx = pos.x / TILE_SIZE + HALF_W_TILES;
+  const fy = pos.y / TILE_SIZE + HALF_H_TILES;
+  const tx = Math.floor(fx);
+  const ty = Math.floor(fy);
+  if (tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT) return null;
+  return { tx, ty };
+}
+
+function tileCenter(tx: number, ty: number): Vec2 {
+  return {
+    x: (tx + 0.5 - HALF_W_TILES) * TILE_SIZE,
+    y: (ty + 0.5 - HALF_H_TILES) * TILE_SIZE,
+  };
+}
+
+function *perimeterTiles(width: number, height: number): Generator<[number, number]> {
+  // Top row (y=0), left->right
+  for (let x = 0; x < width; x++) yield [x, 0];
+  // Right column (x=width-1), top->bottom excluding corners
+  for (let y = 1; y < height - 1; y++) yield [width - 1, y];
+  // Bottom row (y=height-1), right->left
+  if (height > 1) for (let x = width - 1; x >= 0; x--) yield [x, height - 1];
+  // Left column (x=0), bottom->top excluding corners
+  if (width > 1) for (let y = height - 2; y >= 1; y--) yield [0, y];
+}
+
+function evenlySpacedPerimeterPositions(n: number): Array<{ tx: number; ty: number }> {
+  const perim: Array<{ tx: number; ty: number }> = Array.from(perimeterTiles(MAP_WIDTH, MAP_HEIGHT)).map(([tx, ty]) => ({ tx, ty }));
+  const m = perim.length || 1;
+  const out: Array<{ tx: number; ty: number }> = [];
+  for (let i = 0; i < n; i++) {
+    const idx = Math.floor((i * m) / n) % m;
+    out.push(perim[idx]);
   }
+  return out;
+}
 
-  /** Initialize the tile grid (all solid). */
-  private initializeTiles() {
-    const total = cfg.MAP_WIDTH * cfg.MAP_HEIGHT;
-    this.state.tiles = Array.from({ length: total }, (_, idx) => ({
-      idx,
-      state: "solid" as TileState,
-    }));
-  }
+// --- Internal per-connection input state
 
-  /** Add a new player (called when a client joins). */
-  addPlayer(id: PlayerId, name: string, color: string) {
-    const player: Player = {
+interface InputState {
+  move: Vec2;              // latest movement vector (-1..1)
+  dashRequest: boolean;    // edge-triggered request
+  lastSeq: number;         // latest seq number seen
+  lastMoveDir: Vec2;       // last non-zero move dir (for dash direction)
+}
+
+// --- GameRoom
+
+export class GameRoom {
+  readonly id: string;
+
+  private room: RoomState;
+  private leaderboard = new Leaderboard();
+
+  private inputs = new Map<string, InputState>();
+  private events: GameEvent[] = [];
+  private tileDeltaIdx = new Set<number>();
+  private deathAt = new Map<string, number>();
+  private lastSpawns: Array<{ id: string; tx: number; ty: number }> = [];
+
+  constructor(id: string) {
+    this.id = id;
+    this.room = {
       id,
-      name,
-      color,
+      players: new Map<string, Player>(),
+      tiles: this.createFreshTiles(),
+      roundState: "lobby",
+      leaderboard: new Map(), // informational; authoritative data maintained in Leaderboard class
+      tick: 0,
+      mapSeed: (Math.random() * 1e9) | 0,
+      countdownEndAt: undefined,
+    };
+  }
+
+  get state(): Readonly<RoomState> {
+    return this.room;
+  }
+
+  // --- Player lifecycle
+
+  addPlayer(id: string, name: string, color?: string): Player {
+    const p: Player = {
+      id, name, color,
       pos: { x: 0, y: 0 },
       vel: { x: 0, y: 0 },
       alive: false,
@@ -98,325 +160,376 @@ export class Game {
       lastInputSeq: 0,
       ready: false,
     };
-    this.state.players.set(id, player);
-    this.inputQueue.set(id, []);
+    this.room.players.set(id, p);
+    this.inputs.set(id, { move: { x: 0, y: 0 }, dashRequest: false, lastSeq: 0, lastMoveDir: { x: 0, y: 1 } });
+    return p;
   }
 
-  /** Remove a player (e.g., disconnect). */
-  removePlayer(id: PlayerId) {
-    this.state.players.delete(id);
-    this.inputQueue.delete(id);
-  }
-
-  /** Queue an input message from a client. */
-  enqueueInput(playerId: PlayerId, msg: InputMessage) {
-    const queue = this.inputQueue.get(playerId);
-    if (!queue) return; // unknown player
-    // Ensure monotonic sequence numbers.
-    if (msg.seq <= (this.state.players.get(playerId)?.lastInputSeq ?? -1)) {
-      return;
+  removePlayer(id: string) {
+    const p = this.room.players.get(id);
+    if (!p) return;
+    if (this.room.roundState === "inRound" && p.alive) {
+      // Eliminate on disconnect mid-round
+      this.markDead(p, nowMs());
     }
-    queue.push(msg);
+    this.room.players.delete(id);
+    this.inputs.delete(id);
+    this.deathAt.delete(id);
   }
 
-  /** Main tick function – called at TICK_RATE. */
-  tick() {
-    const now = nowMs();
-    const dt = (now - this.lastTickTime) / 1000; // seconds
-    this.lastTickTime = now;
-    this.state.tick++;
+  setReady(id: string, ready: boolean): { allReady: boolean; count: number } {
+    const p = this.room.players.get(id);
+    if (!p) return { allReady: false, count: this.room.players.size };
+    p.ready = ready;
+    const players = Array.from(this.room.players.values());
+    const count = players.length;
+    const allReady = count >= 2 && players.every((pp) => pp.ready);
+    return { allReady, count };
+  }
 
-    // Process inputs first.
-    this.processInputs();
+  // --- Input ingestion
 
-    // Update simulation based on current round state.
-    switch (this.state.roundState) {
-      case "lobby":
-        this.checkLobbyReady();
-        break;
+  handleInput(
+    playerId: string,
+    seq: number,
+    move: Vec2,
+    dash: boolean,
+    recvTimeMs: number,
+  ) {
+    const p = this.room.players.get(playerId);
+    if (!p) return;
+    const input = this.inputs.get(playerId)!;
+
+    // Ensure monotonic seq
+    if (seq < input.lastSeq) return;
+    input.lastSeq = seq;
+
+    // Clamp move
+    input.move = {
+      x: clamp(move.x, -1, 1),
+      y: clamp(move.y, -1, 1),
+    };
+    const norm = normalize(input.move);
+    if (length(norm) > 0) {
+      input.lastMoveDir = norm;
+    }
+
+    // Edge-trigger dash request; processed on next tick if possible
+    if (dash) input.dashRequest = true;
+
+    // Record on Player for reconciliation
+    p.lastInputSeq = seq;
+    // recvTimeMs currently unused; could be used for input rate monitoring or latency metrics
+  }
+
+  // --- Round control
+
+  maybeStartCountdown(now: number) {
+    if (this.room.roundState !== "lobby") return;
+    const players = Array.from(this.room.players.values());
+    if (players.length >= 2 && players.every((p) => p.ready)) {
+      this.room.roundState = "countdown";
+      this.room.countdownEndAt = now + COUNTDOWN_SECONDS * 1000;
+      // No explicit event; server will broadcast countdown message
+    }
+  }
+
+  // Called each simulation tick by server
+  tick(now: number, dtMs: number) {
+    switch (this.room.roundState) {
       case "countdown":
-        this.updateCountdown(now);
+        if ((this.room.countdownEndAt ?? 0) <= now) {
+          this.startRound(now);
+        }
         break;
       case "inRound":
-        this.updateSimulation(dt, now);
+        this.stepSimulation(now, dtMs);
+        this.processTileFalls(now);
+        this.checkEliminations(now);
+        this.maybeEndRound(now);
         break;
       case "roundOver":
-        // Wait a few seconds then reset to lobby.
-        // For simplicity, transition immediately.
-        this.resetToLobby();
+      case "lobby":
+      default:
+        // no-op in fixed tick; transitions managed externally or via maybeStartCountdown
         break;
     }
-
-    // Build a state snapshot for clients.
-    this.lastStateMessage = this.buildStateMessage(now);
+    this.room.tick++;
   }
 
-  /** Process queued input messages for each player. */
-  private processInputs() {
-    for (const [id, queue] of this.inputQueue.entries()) {
-      const player = this.state.players.get(id);
-      if (!player) continue;
-      while (queue.length) {
-        const msg = queue.shift()!;
-        // Update last input seq.
-        player.lastInputSeq = msg.seq;
+  private startRound(now: number) {
+    // Reset tiles
+    this.room.tiles = this.createFreshTiles();
+    this.tileDeltaIdx.clear();
+    this.events.length = 0;
+    this.deathAt.clear();
 
-        // Apply movement direction (normalized).
-        const moveX = Math.max(-1, Math.min(1, msg.move.x));
-        const moveY = Math.max(-1, Math.min(1, msg.move.y));
-        const moveVec = { x: moveX, y: moveY };
+    // Assign spawns on perimeter
+    const playerIds = Array.from(this.room.players.keys());
+    const spawns = evenlySpacedPerimeterPositions(playerIds.length);
+    this.lastSpawns = [];
 
-        // Simple acceleration model.
-        const accel = cfg.PLAYER_ACCEL;
-        const friction = cfg.PLAYER_FRICTION;
-        const targetSpeed = cfg.PLAYER_MOVE_SPEED;
+    for (let i = 0; i < playerIds.length; i++) {
+      const id = playerIds[i];
+      const p = this.room.players.get(id)!;
+      const s = spawns[i];
+      const c = tileCenter(s.tx, s.ty);
+      p.pos = { x: c.x, y: c.y };
+      p.vel = { x: 0, y: 0 };
+      p.alive = true;
+      p.dashUntil = 0;
+      p.dashCooldownUntil = 0;
+      p.lastInputSeq = 0;
 
-        // Apply acceleration toward target direction.
-        const desiredVel = {
-          x: moveVec.x * targetSpeed,
-          y: moveVec.y * targetSpeed,
-        };
-        const dv = {
-          x: desiredVel.x - player.vel.x,
-          y: desiredVel.y - player.vel.y,
-        };
-        // Apply acceleration limited by PLAYER_ACCEL.
-        const maxDelta = accel * (1 / cfg.TICK_RATE);
-        const delta = {
-          x: Math.max(-maxDelta, Math.min(maxDelta, dv.x)),
-          y: Math.max(-maxDelta, Math.min(maxDelta, dv.y)),
-        };
-        player.vel.x += delta.x;
-        player.vel.y += delta.y;
+      const inp = this.inputs.get(id)!;
+      inp.move = { x: 0, y: 0 };
+      inp.dashRequest = false;
+      inp.lastMoveDir = { x: 0, y: 1 };
 
-        // Apply friction.
-        const speed = Math.hypot(player.vel.x, player.vel.y);
-        if (speed > 0) {
-          const frictionDelta = friction * (1 / cfg.TICK_RATE);
-          const newSpeed = Math.max(0, speed - frictionDelta);
-          const scale = newSpeed / speed;
-          player.vel.x *= scale;
-          player.vel.y *= scale;
-        }
-
-        // Dash handling.
-        const nowMs = nowMs();
-        if (msg.dash && nowMs >= player.dashCooldownUntil) {
-          // Apply dash impulse in current movement direction.
-          const dirLen = Math.hypot(moveVec.x, moveVec.y);
-          const impulseDir = dirLen > 0 ? { x: moveVec.x / dirLen, y: moveVec.y / dirLen } : { x: 0, y: 0 };
-          player.vel.x += impulseDir.x * cfg.DASH_IMPULSE;
-          player.vel.y += impulseDir.y * CFG.DASH_IMPULSE;
-          player.dashUntil = nowMs + cfg.DASH_DURATION_MS;
-          player.dashCooldownUntil = nowMs + cfg.DASH_COOLDOWN_MS;
-        }
-      }
-    }
-  }
-
-  /** Check if all players are ready and enough players to start. */
-  private checkLobbyReady() {
-    const players = Array.from(this.state.players.values());
-    const readyCount = players.filter((p) => p.ready).length;
-    const enough = players.length >= 2 && readyCount === players.length;
-    if (enough) {
-      // Transition to countdown.
-      this.state.roundState = "countdown";
-      const now = nowMs();
-      this.state.countdownEndAt = now + cfg.COUNTDOWN_SECONDS * 1000;
-      // Broadcast countdown start (handled elsewhere).
-    }
-  }
-
-  /** Update countdown timer and start round when done. */
-  private updateCountdown(now: number) {
-    if (!this.state.countdownEndAt) return;
-    if (now >= this.state.countdownEndAt) {
-      this.startRound();
-    }
-  }
-
-  /** Start a new round – assign spawns, reset players/tiles. */
-  private startRound() {
-    // Reset tiles.
-    this.initializeTiles();
-
-    // Assign spawn positions on perimeter.
-    const perimeter = this.computePerimeterSpawns();
-    let i = 0;
-    for (const player of this.state.players.values()) {
-      const { x, y } = perimeter[i % perimeter.length];
-      player.pos = { x: x * cfg.TILE_SIZE + cfg.TILE_SIZE / 2, y: y * cfg.TILE_SIZE + cfg.TILE_SIZE / 2 };
-      player.vel = { x: 0, y: 0 };
-      player.alive = true;
-      player.dashCooldownUntil = 0;
-      player.dashUntil = 0;
-      i++;
+      // record spawn assignment
+      this.lastSpawns.push({ id, tx: s.tx, ty: s.ty });
     }
 
-    this.state.roundState = "inRound";
+    this.room.countdownEndAt = undefined;
+    this.room.roundState = "inRound";
   }
 
-  /** Compute perimeter tile coordinates for spawning. */
-  private computePerimeterSpawns(): { x: number; y: number }[] {
-    const positions: { x: number; y: number }[] = [];
-    const w = cfg.MAP_WIDTH;
-    const h = cfg.MAP_HEIGHT;
-    // Top row
-    for (let x = 0; x < w; x++) positions.push({ x, y: 0 });
-    // Right column (excluding corners)
-    for (let y = 1; y < h - 1; y++) positions.push({ x: w - 1, y });
-    // Bottom row (reverse)
-    for (let x = w - 1; x >= 0; x--) positions.push({ x, y: h - 1 });
-    // Left column (excluding corners)
-    for (let y = h - 2; y > 0; y--) positions.push({ x: 0, y });
-    // If more players than perimeter tiles, we will reuse positions.
-    return positions;
+  private endRound(now: number): { placements: Array<{ id: string; place: number }>; winnerId?: string } {
+    const players = Array.from(this.room.players.values());
+    const alive = players.filter((p) => p.alive);
+    const dead = players.filter((p) => !p.alive);
+
+    // Order: alive (winners) first (any order; typically 0..1), then dead by death time descending (later death = better place)
+    const deadSorted = dead.sort((a, b) => (this.deathAt.get(b.id)! - this.deathAt.get(a.id)!));
+    const ordered: Player[] = [...alive, ...deadSorted];
+
+    const placements: Array<{ id: string; place: number }> = [];
+    for (let i = 0; i < ordered.length; i++) {
+      placements.push({ id: ordered[i].id, place: i + 1 });
+    }
+    const winnerId = placements.length > 0 ? placements[0].id : undefined;
+
+    // Update leaderboard internal store
+    this.leaderboard.recordPlacements(placements);
+
+    // Mirror into room.leaderboard (informational)
+    this.room.leaderboard = new Map(
+      players.map((p) => [p.id, this.leaderboard.getStats(p.id)]),
+    );
+
+    this.room.roundState = "roundOver";
+    return { placements, winnerId };
   }
 
-  /** Main simulation for the in‑round state. */
-  private updateSimulation(dt: number, now: number) {
-    // Update player positions.
-    for (const player of this.state.players.values()) {
-      if (!player.alive) continue;
-        // Apply dash expiration.
-        if (player.dashUntil && now >= player.dashUntil) {
-          // End dash – no extra logic needed.
-          player.dashUntil = 0;
-        }
+  // --- Simulation core
 
-        // Update position based on velocity.
-        player.pos.x += player.vel.x * dt;
-        player.pos.y += player.vel.y * dt;
+  private stepSimulation(now: number, dtMs: number) {
+    const dt = dtMs / 1000;
 
-        // Clamp to map bounds.
-        const maxX = cfg.MAP_WIDTH * cfg.TILE_SIZE;
-        const maxY = cfg.MAP_HEIGHT * cfg.TILE_SIZE;
-        if (player.pos.x < 0) player.pos.x = 0;
-        if (player.pos.y < 0) player.pos.y = 0;
-        if (player.pos.x > maxX) player.pos.x = maxX;
-        if (player.pos.y > maxY) player.pos.y = maxY;
+    // Integrate movement per player
+    for (const p of this.room.players.values()) {
+      if (!p.alive) continue;
+      const input = this.inputs.get(p.id)!;
 
-        // Determine tile under player.
-        const tx = Math.floor(player.pos.x / cfg.TILE_SIZE);
-        const ty = Math.floor(player.pos.y / cfg.TILE_SIZE);
-        const idx = tileIndex(tx, ty);
-        const tile = this.state.tiles[idx];
-        if (!tile) continue;
-
-        // Tile stepping logic.
-        if (tile.state === "solid") {
-          // First step on tile – start shaking.
-          tile.state = "shaking";
-          tile.shakeStartMs = now;
-          tile.fallAtMs = now + cfg.TILE_FALL_DELAY_MS;
+      // Handle dash start
+      if (input.dashRequest && now >= p.dashCooldownUntil) {
+        input.dashRequest = false;
+        const dir = normalize(input.lastMoveDir);
+        if (length(dir) > 0) {
+          p.dashUntil = now + DASH_DURATION_MS;
+          p.dashCooldownUntil = now + DASH_COOLDOWN_MS;
+          p.vel = add(p.vel, mul(dir, DASH_IMPULSE));
         }
       }
 
-    // Process tile shaking/falling.
-    for (const tile of this.state.tiles) {
-      if (tile.state === "shaking" && tile.fallAtMs && now >= tile.fallAtMs) {
-        // Tile falls.
-        tile.state = "fallen";
-        // Check players standing on this tile.
-        for (const player of this.state.players.values()) {
-          if (!player.alive) continue;
-          const tx = Math.floor(player.pos.x / cfg.TILE_SIZE);
-          const ty = Math.floor(player.pos.y / cfg.TILE_SIZE);
-          const idx = tileIndex(tx, ty);
-          if (idx === tile.idx) {
-            // Player's tile fell – player dies.
-            player.alive = false;
+      // Target velocity based on move input
+      const desired = mul(normalize(input.move), PLAYER_MOVE_SPEED);
+      // Accelerate towards desired
+      const accel = PLAYER_ACCEL;
+      const delta = sub(desired, p.vel);
+      const deltaLen = length(delta);
+      if (deltaLen > 0) {
+        const step = Math.min(deltaLen, accel * dt);
+        p.vel = add(p.vel, mul(mul(delta, 1 / (deltaLen || 1)), step));
+      }
+
+      // Friction (less when dashing)
+      const friction = now < p.dashUntil ? PLAYER_FRICTION * 0.35 : PLAYER_FRICTION;
+      const speed = length(p.vel);
+      if (speed > 0) {
+        const reduce = Math.max(0, speed - friction * dt);
+        p.vel = mul(normalize(p.vel), reduce);
+      }
+
+      // Integrate position
+      p.pos = add(p.pos, mul(p.vel, dt));
+
+      // Tile stepping: trigger shake on first step onto SOLID
+      const tile = posToTile(p.pos);
+      if (tile) {
+        const idx = tileIndex(tile.tx, tile.ty);
+        const t = this.room.tiles[idx];
+        if (t.state === "solid") {
+          t.state = "shaking";
+          t.shakeStartMs = now;
+          t.fallAtMs = now + TILE_FALL_DELAY_MS;
+          this.events.push({ kind: "tile_shake", idx });
+          this.tileDeltaIdx.add(idx);
+        }
+      }
+    }
+
+    // Player-player collisions and dash pushback
+    const players = Array.from(this.room.players.values()).filter((p) => p.alive);
+    for (let i = 0; i < players.length; i++) {
+      for (let j = i + 1; j < players.length; j++) {
+        const a = players[i];
+        const b = players[j];
+        const d = sub(b.pos, a.pos);
+        const dist = length(d);
+        const minDist = 2 * PLAYER_RADIUS;
+        if (dist > 0 && dist < minDist) {
+          const n = mul(d, 1 / dist);
+          const overlap = minDist - dist;
+          // Separate equally
+          a.pos = add(a.pos, mul(n, -overlap / 2));
+          b.pos = add(b.pos, mul(n, overlap / 2));
+
+          // Dash pushback
+          const aDash = now < a.dashUntil;
+          const bDash = now < b.dashUntil;
+          if (aDash && !bDash) {
+            b.vel = add(b.vel, mul(n, overlap + DASH_PUSHBACK_IMPULSE));
+          } else if (bDash && !aDash) {
+            a.vel = add(a.vel, mul(n, -(overlap + DASH_PUSHBACK_IMPULSE)));
           }
         }
       }
     }
+  }
 
-    // Check for round end.
-    const alivePlayers = Array.from(this.state.players.values()).filter(
-      (p) => p.alive,
-    );
-    if (alivePlayers.length <= 1) {
-      this.endRound(alivePlayers);
+  private processTileFalls(now: number) {
+    for (let idx = 0; idx < this.room.tiles.length; idx++) {
+      const t = this.room.tiles[idx];
+      if (t.state === "shaking" && (t.fallAtMs ?? Infinity) <= now) {
+        t.state = "fallen";
+        // remove shakeStartMs to indicate final state
+        t.shakeStartMs = t.shakeStartMs;
+        this.events.push({ kind: "tile_fall", idx });
+        this.tileDeltaIdx.add(idx);
+      }
     }
   }
 
-  /** End the round and compute placements. */
-  private endRound(alivePlayers: Player[]) {
-    // Determine placements.
-    const placements: { id: PlayerId; place: number }[] = [];
-    const sorted = Array.from(this.state.players.values()).sort(
-      (a, b) => {
-        // Alive first, then by name for deterministic order.
-        if (a.alive && !b.alive) return -1;
-        if (!a.alive && b.alive) return 1;
-        return a.name.localeCompare(b.name);
-      },
-    );
-    let place = 1;
-    for (const p of sorted) {
-      placements.push({ id: p.id, place });
-      place++;
+  private checkEliminations(now: number) {
+    for (const p of this.room.players.values()) {
+      if (!p.alive) continue;
+      const tt = posToTile(p.pos);
+      if (!tt) {
+        this.markDead(p, now);
+        continue;
+      }
+      const idx = tileIndex(tt.tx, tt.ty);
+      const t = this.room.tiles[idx];
+      if (t.state === "fallen") {
+        this.markDead(p, now);
+      }
     }
-
-    // Record placements in leaderboard.
-    for (const { id, place } of placements) {
-      const entry = this.state.leaderboard.get(id) ?? {
-        wins: 0,
-        games: 0,
-        totalPlace: 0,
-      };
-      entry.games += 1;
-      entry.totalPlace += place;
-      if (place === 1) entry.wins += 1;
-      this.state.leaderboard.set(id, entry);
-    }
-
-    // Broadcast round_over (handled elsewhere).
-    this.state.roundState = "roundOver";
   }
 
-  /** Reset the game to lobby state after a round. */
-  private resetToLobby() {
-    // Reset ready flags.
-    for (const player of this.state.players.values()) {
-      player.ready = false;
-      player.alive = false;
+  private maybeEndRound(now: number) {
+    const aliveCount = Array.from(this.room.players.values()).filter((p) => p.alive).length;
+    if (aliveCount <= 1) {
+      // Compute placements and update leaderboard; server will broadcast "round_over"
+      this.endRound(now);
     }
-    this.state.roundState = "lobby";
   }
 
-  /** Build a snapshot state message for clients. */
-  private buildStateMessage(now: number): ServerMessage {
-    const players = Array.from(this.state.players.values()).map(
-      (p) => ({
+  private markDead(p: Player, at: number) {
+    p.alive = false;
+    this.deathAt.set(p.id, at);
+    this.events.push({ kind: "death", playerId: p.id });
+  }
+
+  private createFreshTiles(): Tile[] {
+    const tiles: Tile[] = new Array(MAP_WIDTH * MAP_HEIGHT);
+    for (let i = 0; i < tiles.length; i++) {
+      tiles[i] = { idx: i, state: "solid" };
+    }
+    return tiles;
+    }
+
+  // --- Snapshots and events
+
+  buildSnapshotAndClear(): SnapshotData {
+    const players: PlayerSnapshot[] = [];
+    for (const p of this.room.players.values()) {
+      players.push({
         id: p.id,
-        pos: p.pos,
-        vel: p.vel,
-        dashActive: now < p.dashUntil,
+        pos: { ...p.pos },
+        vel: { ...p.vel },
+        dashActive: nowMs() < p.dashUntil,
         alive: p.alive,
-      }),
-    );
+      });
+    }
 
-    // For simplicity, send all tiles (could be optimized to deltas).
-    const tiles = this.state.tiles.map((t) => ({
-      idx: t.idx,
-      state: t.state,
-    }));
+    const tiles: TileDelta[] = [];
+    for (const idx of this.tileDeltaIdx) {
+      const t = this.room.tiles[idx];
+      if (t.state !== "solid") {
+        tiles.push({ idx, state: t.state });
+      }
+    }
+    this.tileDeltaIdx.clear();
 
-    const msg: ServerMessage = {
-      type: "state",
-      tick: this.state.tick,
-      serverTime: now,
-      players,
-      tiles,
-      events: [], // No events emitted in this simplified version.
-    };
-    return msg;
+    const events = this.events.splice(0, this.events.length);
+
+    return { players, tiles, events };
   }
 
-  /** Get the latest state message (for sending). */
-  getLatestState(): ServerMessage | null {
-    return this.lastStateMessage;
+  // Server uses this after state.roundOver detected to get placements and winner
+  computeRoundResults(): { placements: Array<{ id: string; place: number }>; winnerId?: string } {
+    // We didn't store the last computed results; recompute using endRound logic without side effects.
+    // Duplicate logic to produce consistent results:
+    const players = Array.from(this.room.players.values());
+    const alive = players.filter((p) => p.alive);
+    const dead = players.filter((p) => !p.alive);
+    const deadSorted = dead.sort((a, b) => (this.deathAt.get(b.id)! - this.deathAt.get(a.id)!));
+    const ordered: Player[] = [...alive, ...deadSorted];
+    const placements: Array<{ id: string; place: number }> = [];
+    for (let i = 0; i < ordered.length; i++) placements.push({ id: ordered[i].id, place: i + 1 });
+    const winnerId = placements.length > 0 ? placements[0].id : undefined;
+    return { placements, winnerId };
+  }
+
+  // --- Lobby helpers used by server
+
+  lobbyView(): Array<{ id: string; name: string; color?: string; ready: boolean }> {
+    return Array.from(this.room.players.values()).map((p) => ({
+      id: p.id, name: p.name, color: p.color, ready: p.ready,
+    }));
+  }
+getLastSpawnAssignments(): Array<{ id: string; tx: number; ty: number }> {
+    return this.lastSpawns.slice();
+  }
+
+  resetToLobby() {
+    // Reset players and room to Lobby state
+    for (const p of this.room.players.values()) {
+      p.ready = false;
+      p.alive = false;
+      p.vel = { x: 0, y: 0 };
+    }
+    this.room.tiles = this.createFreshTiles();
+    this.tileDeltaIdx.clear();
+    this.events.length = 0;
+    this.deathAt.clear();
+    this.lastSpawns = [];
+    this.room.countdownEndAt = undefined;
+    this.room.roundState = "lobby";
+  }
+
+  leaderboardSnapshot(): ReturnType<Leaderboard["snapshot"]> {
+    return this.leaderboard.snapshot(this.room);
   }
 }
