@@ -155,7 +155,7 @@ export class UI {
 
   // ----- Leaderboard -----
 
-  showLeaderboard(entries) {
+  showLeaderboard(entries, youWon = false) {
     this.leaderboardBody.innerHTML = '';
     for (const e of entries) {
       const tr = document.createElement('tr');
@@ -167,6 +167,16 @@ export class UI {
       `;
       this.leaderboardBody.appendChild(tr);
     }
+    // Banner text
+    const card = this.leaderboardModal.querySelector('.card');
+    let banner = card.querySelector('#winBanner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'winBanner';
+      card.insertBefore(banner, card.firstChild);
+    }
+    banner.textContent = youWon ? 'YOU WON!' : 'Round Over';
+    banner.style.cssText = 'margin-bottom:8px;font-weight:800;font-size:18px;color:#e74c3c;text-align:center;';
     this.leaderboardModal.style.display = 'flex';
   }
 

@@ -4,6 +4,8 @@ export class Input {
   constructor() {
     this._keys = new Set();
     this._dashEdge = false;
+    this._touchEnabled = false;
+    this._touchVec = { x: 0, y: 0 };
 
     this._onKeyDown = (e) => {
       const k = e.key;
@@ -33,6 +35,16 @@ export class Input {
   }
 
   getMoveVec() {
+    // If touch is enabled, prefer touch vector
+    if (this._touchEnabled) {
+      let x = Math.max(-1, Math.min(1, this._touchVec.x || 0));
+      let y = Math.max(-1, Math.min(1, this._touchVec.y || 0));
+      const m = Math.hypot(x, y);
+      if (m > 1) { x /= m; y /= m; }
+      return { x, y };
+    }
+
+    // Keyboard arrows
     const left = this._keys.has('ArrowLeft');
     const right = this._keys.has('ArrowRight');
     const up = this._keys.has('ArrowUp');
@@ -56,6 +68,22 @@ export class Input {
       return true;
     }
     return false;
+  }
+
+  // ---- Touch integration ----
+  setTouchEnabled(flag) {
+    this._touchEnabled = !!flag;
+    if (!this._touchEnabled) {
+      this._touchVec = { x: 0, y: 0 };
+    }
+  }
+
+  setTouchMove(vec) {
+    this._touchVec = { x: vec?.x || 0, y: vec?.y || 0 };
+  }
+
+  triggerDash() {
+    this._dashEdge = true;
   }
 
   destroy() {

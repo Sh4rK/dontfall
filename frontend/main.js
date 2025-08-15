@@ -5,6 +5,7 @@ import { net } from './net.js';
 import { Input } from './input.js';
 import { UI } from './ui.js';
 import { Renderer } from './render.js';
+import { TouchControls } from './touch.js';
 
 // ===== Helpers =====
 const now = () => performance.now();
@@ -22,6 +23,8 @@ const ui = new UI();
 const container = document.getElementById('game');
 const renderer = new Renderer(container);
 const input = new Input();
+// Initialize touch controls (auto-enabled on coarse pointers)
+const touch = new TouchControls(input);
 
 const urlParams = new URLSearchParams(location.search);
 const roomId = urlParams.get('roomId')?.trim() || 'default';
@@ -36,6 +39,8 @@ const playerColor = new Map(); // id -> color
 // id -> [{ t: serverTime(ms), pos, vel, dashActive, alive }]
 const interp = new Map();
 const INTERP_BUF_LIMIT = 60; // keep ~6s at 10 Hz; trimmed anyway
+// Track death times for fall-out visuals
+const deathAt = new Map();
 
 // Local prediction state
 let seq = 0;
@@ -53,6 +58,7 @@ let local = {
 let countdownEndAt = null;      // serverTime ms
 let arrowHideAt = 0;            // serverTime ms
 let lastAckSeq = 0;
+let lastWinnerId = null;
 
 // Tiles visual model (for shake/fall)
 let tiles = {
@@ -115,6 +121,9 @@ net.setHandlers({
       if (p.color) playerColor.set(p.id, p.color);
     }
     ui.renderLobby(msg.players, selfId);
+    // Sync Ready button with server state
+    const me = msg.players.find((p) => p.id === selfId);
+    if (me) ui.setReadyState(!!me.ready);
   },
   countdown: (msg) => {
     countdownEndAt = msg.serverTime + (msg.seconds * 1000);
@@ -141,6 +150,8 @@ net.setHandlers({
         tiles.state[ev.idx] = 2;
         tiles.fallStart[ev.idx] = tSrv;
       } else if (ev.kind === 'death') {
+        // record death time for fall-out visuals
+        deathAt.set(ev.playerId, tSrv);
         // mark death; if it's us, trust server
         if (ev.playerId === selfId) {
           local.alive = false;
@@ -190,14 +201,16 @@ net.setHandlers({
       }
     }
   },
-  round_over: (_msg) => {
+  round_over: (msg) => {
     // Countdown off; arrow hidden
     countdownEndAt = null;
     ui.setCountdownVisible(false);
     arrowHideAt = 0;
+    lastWinnerId = msg.winnerId || null;
   },
   leaderboard: (msg) => {
-    ui.showLeaderboard(msg.entries || []);
+    const won = !!selfId && lastWinnerId === selfId;
+    ui.showLeaderboard(msg.entries || [], won);
   },
   close: () => {
     // simplistic: reload on disconnect
@@ -323,6 +336,7 @@ function raf() {
       vel: { ...local.vel },
       dashActive: (nowSrv < local.dashUntil),
       alive: local.alive,
+      deathAt: deathAt.get(selfId),
       color: playerColor.get(selfId) || '#cccccc',
     });
   }
@@ -338,6 +352,7 @@ function raf() {
       vel: s.vel,
       dashActive: s.dashActive,
       alive: s.alive,
+      deathAt: deathAt.get(id),
       color: playerColor.get(id) || '#cccccc',
     });
   }

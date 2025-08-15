@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Don't Fall</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <style>
     :root {
       --bg-top: #e8f1ff;
@@ -16,7 +16,8 @@
       --muted: #889;
     }
     html, body {
-      margin: 0; padding: 0; height: 100%;
+      margin: 0; padding: 0;
+      height: 100vh; min-height: 100dvh;
       background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
       color: var(--text);
       font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
@@ -127,6 +128,32 @@
     th, td { padding: 6px 4px; border-bottom: 1px solid rgba(0,0,0,0.08); text-align: left; }
     th { font-size: 12px; color: var(--muted); }
     .hidden { display: none !important; }
+
+    /* Touch controls */
+    #touchControls { position: absolute; inset: 0; pointer-events: none; }
+    #joyArea {
+      position: absolute; left: 16px; bottom: 16px;
+      width: 160px; height: 160px; border-radius: 50%;
+      background: rgba(255,255,255,0.35);
+      border: 2px solid rgba(0,0,0,0.15);
+      backdrop-filter: blur(2px);
+      pointer-events: auto; touch-action: none;
+    }
+    #joyKnob {
+      position: absolute; left: 50%; top: 50%;
+      width: 64px; height: 64px; border-radius: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(255,255,255,0.9);
+      border: 2px solid rgba(0,0,0,0.2);
+    }
+    #dashBtn {
+      position: absolute; right: 16px; bottom: 36px;
+      width: 96px; height: 96px; border-radius: 50%; border: 0;
+      pointer-events: auto; touch-action: manipulation;
+      background: radial-gradient(circle at 30% 30%, #ff9f8f, #ff6b5e);
+      color: white; font-weight: 800;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.2);
+    }
   </style>
 </head>
 <body>
@@ -147,6 +174,11 @@
 
     <div id="cooldownBar">
       <div id="cooldownFill"></div>
+    </div>
+
+    <div id="touchControls">
+      <div id="joyArea"><div id="joyKnob"></div></div>
+      <button id="dashBtn">DASH</button>
     </div>
   </div>
 

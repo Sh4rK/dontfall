@@ -36,12 +36,9 @@ export class Renderer {
     // Camera
     const fov = 60;
     const aspect = this.container.clientWidth / Math.max(1, this.container.clientHeight);
-    this.camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 200);
-    const span = Math.max(W, H) * TS;
-    const camY = span * 0.9;
-    const camZ = span * 0.9;
-    this.camera.position.set(0, camY, camZ);
-    this.camera.lookAt(0, 0, 0);
+    this.camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 500);
+    // Fit camera to grid span with a simple heuristic (zoom out more in portrait)
+    this.updateCameraFit();
 
     // Renderer
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -86,6 +83,28 @@ export class Renderer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
+    // Recompute a conservative fit on viewport changes (mobile chrome bars, rotation)
+    this.updateCameraFit();
+  }
+
+  // Recompute camera fit based on grid span and aspect
+  updateCameraFit() {
+    if (!this.camera) return;
+    const span = Math.max(this.tileGrid.width, this.tileGrid.height) * this.tileGrid.size;
+    const aspect = this.container.clientWidth / Math.max(1, this.container.clientHeight);
+    const isCoarse = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(pointer: coarse)').matches : false;
+
+    // Mobile (coarse): keep conservative distance; Desktop: come closer to fill screen
+    let base;
+    if (isCoarse) {
+      base = aspect < 1 ? 1.6 : 1.25;
+    } else {
+      base = aspect < 1 ? 1.1 : 0.90;
+    }
+
+    const camDist = Math.max(2.0, span * base);
+    this.camera.position.set(0, camDist, camDist);
+    this.camera.lookAt(0, 0, 0);
   }
 
   // Ensure player mesh exists and color set
@@ -126,7 +145,7 @@ export class Renderer {
       const { width, height, halfW, halfH, size } = this.tileGrid;
       const amp = constants.TILE_SHAKE_AMPLITUDE ?? 0.05;
       const freq = constants.TILE_SHAKE_FREQUENCY_HZ ?? 10;
-      const fallDur = 800; // ms visual drop
+      // tile fall handled with speed-based drop
 
       for (let ty = 0; ty < height; ty++) {
         for (let tx = 0; tx < width; tx++) {
@@ -144,8 +163,13 @@ export class Renderer {
             const t = (nowMs - shakeStart) / 1000;
             y += amp * Math.sin(t * freq * Math.PI * 2);
           } else if (st === 2) {
-            const prog = Math.min(1, Math.max(0, (nowMs - fallStart) / fallDur));
-            y -= prog * 2.0; // drop down 2 units
+            // Fall far down quickly, then cull by sending far below frustum
+            const elapsed = Math.max(0, nowMs - fallStart);
+            const fallSpeed = 30; // units/sec
+            const maxDrop = 80;   // units to fall before culling
+            let drop = (elapsed / 1000) * fallSpeed;
+            if (drop > maxDrop) drop = 1000; // place far below camera far plane
+            y -= drop;
           }
 
           this._v.set(x, y, z);
@@ -161,14 +185,28 @@ export class Renderer {
     for (const [id, pstate] of displayPlayers) {
       const mesh = this.ensurePlayer(id, pstate.color, constants);
       seen.add(id);
+      const baseY = (constants.PLAYER_HEIGHT ?? 1.2) / 2;
+
       if (pstate.alive) {
+        // Alive: normal pose
         mesh.visible = true;
-        mesh.position.set(pstate.pos.x, (constants.PLAYER_HEIGHT ?? 1.2) / 2, pstate.pos.y);
-        // subtle dash highlight
+        mesh.position.set(pstate.pos.x, baseY, pstate.pos.y);
         const dash = !!pstate.dashActive;
         mesh.material.emissive.setHex(dash ? 0x333333 : 0x000000);
       } else {
-        mesh.visible = false;
+        // Dead: keep visible briefly and let them "fall" down
+        const dAt = pstate.deathAt;
+        if (typeof dAt === 'number') {
+          const elapsed = Math.max(0, nowMs - dAt);
+          // drop up to ~4 units over ~1.6s
+          const drop = Math.min(4.0, (elapsed / 1000) * 2.5);
+          mesh.visible = true;
+          mesh.material.emissive.setHex(0x000000);
+          mesh.position.set(pstate.pos.x, baseY - drop, pstate.pos.y);
+        } else {
+          // No death timestamp (e.g., lobby), hide
+          mesh.visible = false;
+        }
       }
     }
     // Hide meshes not present
