@@ -27,15 +27,26 @@ export class TouchControls {
       const dy = y - this.center.y;
       const m = Math.hypot(dx, dy);
       const clamped = m > this.radius ? this.radius : m;
-      const sx = m > 1e-6 ? (dx * clamped / m) : 0;
-      const sy = m > 1e-6 ? (dy * clamped / m) : 0;
 
-      // Visual knob
+      // Snap angle to 8 directions (cardinal + 45°)
+      const step = Math.PI / 4; // 45 degrees
+      let sx = 0, sy = 0, nx = 0, ny = 0;
+      if (m > 1e-6) {
+        const ang = Math.atan2(dy, dx);
+        const snapped = Math.round(ang / step) * step;
+        const ux = Math.cos(snapped);
+        const uy = Math.sin(snapped);
+        // Visual offset in px
+        sx = ux * clamped;
+        sy = uy * clamped;
+        // Normalized move vector -1..1
+        nx = sx / this.radius;
+        ny = sy / this.radius;
+      }
+
+      // Visual knob (snapped)
       this.joyKnob.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -50%)`;
 
-      // Normalize to -1..1; match keyboard mapping (ArrowUp = -1)
-      const nx = (sx / this.radius);
-      const ny = (sy / this.radius);
       this.moveVec = { x: nx, y: ny };
       this.input.setTouchMove(this.moveVec);
     };
