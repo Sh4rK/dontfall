@@ -11,7 +11,7 @@ export const SPAWN_PERIMETER_ONLY = true as const;
 export const TICK_RATE = 30 as const; // server simulation ticks/sec
 export const STATE_SNAPSHOT_RATE = 10 as const; // server sends state updates/sec
 export const COUNTDOWN_SECONDS = 3 as const;
-export const TILE_FALL_DELAY_MS = 3000 as const;
+export const TILE_FALL_DELAY_MS = 2200 as const;
 export const INTERP_BUFFER_MS = 100 as const;
 
 // Player physics
@@ -25,12 +25,15 @@ export const PLAYER_HEIGHT = 1.2 as const;
 export const DASH_IMPULSE = 10.0 as const;
 export const DASH_DURATION_MS = 180 as const;
 export const DASH_COOLDOWN_MS = 2000 as const;
-export const DASH_PUSHBACK_IMPULSE = 6.0 as const;
+export const DASH_PUSHBACK_IMPULSE = 8.0 as const;
 
 // Visual tuning (mirrored client-side)
-export const TILE_SHAKE_AMPLITUDE = 0.05 as const;
-export const TILE_SHAKE_FREQUENCY_HZ = 10 as const;
+export const TILE_SHAKE_AMPLITUDE = 0.08 as const;
+export const TILE_SHAKE_FREQUENCY_HZ = 12 as const;
 export const ARROW_MARKER_DURATION_MS = 1500 as const;
+
+// Server-only gameplay grace to allow brief gap traversal
+export const FALL_GRACE_MS = 120 as const;
 
 // Server-only configuration
 export const HTTP_PORT = 8000 as const;
@@ -67,6 +70,7 @@ export const CONSTANTS = {
   TILE_SHAKE_AMPLITUDE,
   TILE_SHAKE_FREQUENCY_HZ,
   ARROW_MARKER_DURATION_MS,
+  // FALL_GRACE_MS is server-only (not needed client-side)
 } as const;
 
 export type ServerConstants = typeof CONSTANTS;

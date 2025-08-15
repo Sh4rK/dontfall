@@ -152,15 +152,27 @@ function handleRoomTransitions(ctx: RoomContext, now: number) {
       const roundOver = { type: "round_over", placements, winnerId } as const;
       broadcast(ctx, roundOver);
 
-      const leaderboard = ctx.room.leaderboardSnapshot();
-      const lbMsg = { type: "leaderboard", entries: leaderboard } as const;
-      broadcast(ctx, lbMsg);
+      // Delay leaderboard popup so players can watch the fall animation
+      const LEADERBOARD_DELAY_MS = 1500;
+      setTimeout(() => {
+        const leaderboard = ctx.room.leaderboardSnapshot();
+        const lbMsg = { type: "leaderboard", entries: leaderboard } as const;
+        broadcast(ctx, lbMsg);
+      }, LEADERBOARD_DELAY_MS);
 
-      // Return to lobby after short delay (3.5s)
-      const RESET_DELAY_MS = 3500;
+      // Return to lobby after short delay (~5.0s total)
+      const RESET_DELAY_MS = 5000;
       setTimeout(() => {
         ctx.room.resetToLobby();
         broadcastLobby(ctx);
+
+        // Auto-start next round if everyone is still ready (no need to re-ready)
+        const players = ctx.room.lobbyView();
+        const allReady = players.length >= 2 && players.every((p) => p.ready);
+        if (allReady) {
+          ctx.room.maybeStartCountdown(nowMs());
+          broadcastCountdown(ctx);
+        }
       }, RESET_DELAY_MS);
     }
 

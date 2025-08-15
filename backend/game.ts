@@ -14,6 +14,7 @@ import {
   PLAYER_RADIUS,
   TILE_FALL_DELAY_MS,
   TILE_SIZE,
+  FALL_GRACE_MS,
 } from "./config.ts";
 import type {
   GameEvent,
@@ -127,7 +128,9 @@ export class GameRoom {
   private events: GameEvent[] = [];
   private tileDeltaIdx = new Set<number>();
   private deathAt = new Map<string, number>();
+  private unsupportedSince = new Map<string, number>();
   private lastSpawns: Array<{ id: string; tx: number; ty: number }> = [];
+  private nextRandomShakeAt: number = 0;
 
   constructor(id: string) {
     this.id = id;
@@ -175,6 +178,7 @@ export class GameRoom {
     this.room.players.delete(id);
     this.inputs.delete(id);
     this.deathAt.delete(id);
+    this.unsupportedSince.delete(id);
   }
 
   setReady(id: string, ready: boolean): { allReady: boolean; count: number } {
@@ -244,6 +248,7 @@ export class GameRoom {
         break;
       case "inRound":
         this.stepSimulation(now, dtMs);
+        this.maybeRandomShake(now);
         this.processTileFalls(now);
         this.checkEliminations(now);
         this.maybeEndRound(now);
@@ -289,6 +294,9 @@ export class GameRoom {
       // record spawn assignment
       this.lastSpawns.push({ id, tx: s.tx, ty: s.ty });
     }
+
+    // schedule first random tile shake in 1s
+    this.nextRandomShakeAt = now + 1000;
 
     this.room.countdownEndAt = undefined;
     this.room.roundState = "inRound";
@@ -395,10 +403,13 @@ export class GameRoom {
           a.pos = add(a.pos, mul(n, -overlap / 2));
           b.pos = add(b.pos, mul(n, overlap / 2));
 
-          // Dash pushback
+          // Dash pushback (stronger and also when both dashing)
           const aDash = now < a.dashUntil;
           const bDash = now < b.dashUntil;
-          if (aDash && !bDash) {
+          if (aDash && bDash) {
+            a.vel = add(a.vel, mul(n, -(overlap + DASH_PUSHBACK_IMPULSE * 0.5)));
+            b.vel = add(b.vel, mul(n, (overlap + DASH_PUSHBACK_IMPULSE * 0.5)));
+          } else if (aDash && !bDash) {
             b.vel = add(b.vel, mul(n, overlap + DASH_PUSHBACK_IMPULSE));
           } else if (bDash && !aDash) {
             a.vel = add(a.vel, mul(n, -(overlap + DASH_PUSHBACK_IMPULSE)));
@@ -421,18 +432,50 @@ export class GameRoom {
     }
   }
 
+  // Randomly pick a SOLID tile once per second, start shaking, fall after normal delay
+  private maybeRandomShake(now: number) {
+    if (now < this.nextRandomShakeAt) return;
+    this.nextRandomShakeAt = now + 1000;
+
+    const solids: number[] = [];
+    for (let i = 0; i < this.room.tiles.length; i++) {
+      if (this.room.tiles[i].state === "solid") solids.push(i);
+    }
+    if (solids.length === 0) return;
+
+    const idx = solids[(Math.random() * solids.length) | 0];
+    const t = this.room.tiles[idx];
+    t.state = "shaking";
+    t.shakeStartMs = now;
+    t.fallAtMs = now + TILE_FALL_DELAY_MS;
+    this.events.push({ kind: "tile_shake", idx });
+    this.tileDeltaIdx.add(idx);
+  }
+
   private checkEliminations(now: number) {
     for (const p of this.room.players.values()) {
       if (!p.alive) continue;
       const tt = posToTile(p.pos);
       if (!tt) {
+        // Off-grid: immediate death per spec
         this.markDead(p, now);
+        this.unsupportedSince.delete(p.id);
         continue;
       }
       const idx = tileIndex(tt.tx, tt.ty);
       const t = this.room.tiles[idx];
       if (t.state === "fallen") {
-        this.markDead(p, now);
+        // Allow brief grace; allow dashing across gaps
+        const start = this.unsupportedSince.get(p.id) ?? now;
+        this.unsupportedSince.set(p.id, start);
+        const dashing = now < p.dashUntil;
+        if (!dashing && (now - start) >= FALL_GRACE_MS) {
+          this.markDead(p, now);
+          this.unsupportedSince.delete(p.id);
+        }
+      } else {
+        // Supported again, clear grace timer
+        this.unsupportedSince.delete(p.id);
       }
     }
   }
@@ -516,7 +559,7 @@ getLastSpawnAssignments(): Array<{ id: string; tx: number; ty: number }> {
   resetToLobby() {
     // Reset players and room to Lobby state
     for (const p of this.room.players.values()) {
-      p.ready = false;
+      // keep ready state across rounds
       p.alive = false;
       p.vel = { x: 0, y: 0 };
     }
@@ -524,7 +567,9 @@ getLastSpawnAssignments(): Array<{ id: string; tx: number; ty: number }> {
     this.tileDeltaIdx.clear();
     this.events.length = 0;
     this.deathAt.clear();
+    this.unsupportedSince.clear();
     this.lastSpawns = [];
+    this.nextRandomShakeAt = 0;
     this.room.countdownEndAt = undefined;
     this.room.roundState = "lobby";
   }

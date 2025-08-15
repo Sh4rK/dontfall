@@ -126,6 +126,8 @@ net.setHandlers({
     if (me) ui.setReadyState(!!me.ready);
   },
   countdown: (msg) => {
+    // Close leaderboard for everyone when countdown starts
+    ui.hideLeaderboard();
     countdownEndAt = msg.serverTime + (msg.seconds * 1000);
     ui.setCountdownVisible(true);
   },
