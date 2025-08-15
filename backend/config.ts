@@ -28,8 +28,8 @@ export const DASH_COOLDOWN_MS = 2000 as const;
 export const DASH_PUSHBACK_IMPULSE = 8.0 as const;
 
 // Visual tuning (mirrored client-side)
-export const TILE_SHAKE_AMPLITUDE = 0.08 as const;
-export const TILE_SHAKE_FREQUENCY_HZ = 12 as const;
+export const TILE_SHAKE_AMPLITUDE = 0.15 as const;
+export const TILE_SHAKE_FREQUENCY_HZ = 10 as const;
 export const ARROW_MARKER_DURATION_MS = 1500 as const;
 
 // Server-only gameplay grace to allow brief gap traversal
