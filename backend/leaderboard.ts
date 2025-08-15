@@ -37,11 +37,12 @@ export class Leaderboard {
   snapshot(room: Pick<RoomState, "players">): LeaderboardEntry[] {
     const entries: LeaderboardEntry[] = [];
     for (const [id, stats] of this.stats) {
-      const name = room.players.get(id)?.name ?? "(left)";
+      const p = room.players.get(id);
+      if (!p) continue; // remove disconnected players from leaderboard
       const avgPlace = stats.games > 0 ? stats.totalPlace / stats.games : 0;
       entries.push({
         id,
-        name,
+        name: p.name,
         wins: stats.wins,
         games: stats.games,
         totalPlace: stats.totalPlace,

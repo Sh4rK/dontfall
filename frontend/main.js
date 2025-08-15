@@ -202,6 +202,14 @@ net.setHandlers({
         if (buf.length > INTERP_BUF_LIMIT) buf.splice(0, buf.length - INTERP_BUF_LIMIT);
       }
     }
+
+    // prune interpolation buffers for disconnected players
+    const present = new Set(msg.players.map(p => p.id));
+    for (const id of Array.from(interp.keys())) {
+      if (id !== selfId && !present.has(id)) {
+        interp.delete(id);
+      }
+    }
   },
   round_over: (msg) => {
     // Countdown off; arrow hidden
@@ -321,12 +329,14 @@ function raf() {
     if (remaining > 0) ui.setCountdownText(String(secLeft));
   }
 
-  // Cooldown bar for local
+  // Cooldown bar for local (use performance timer to match local dash timers)
   const cdMs = C.DASH_COOLDOWN_MS || 2000;
   const nowSrv = net.getServerNow();
-  const remainingCd = Math.max(0, local.dashCooldownUntil - nowSrv);
+  const nowPerf = performance.now();
+  const remainingCd = Math.max(0, local.dashCooldownUntil - nowPerf);
   const frac = cdMs > 0 ? 1 - (remainingCd / cdMs) : 1;
   ui.setCooldownProgress(frac);
+  ui.setCooldownLabel(remainingCd);
 
   // Compose display players
   const displayPlayers = new Map();

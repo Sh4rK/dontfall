@@ -107,6 +107,39 @@ function evenlySpacedPerimeterPositions(n: number): Array<{ tx: number; ty: numb
   return out;
 }
 
+// Inner-perimeter ring (one tile in from the edge)
+function* innerPerimeterTiles(width: number, height: number): Generator<[number, number]> {
+  if (width < 3 || height < 3) {
+    // No inner ring possible
+    return;
+  }
+  const minX = 1, maxX = width - 2;
+  const minY = 1, maxY = height - 2;
+
+  // Top inner row
+  for (let x = minX; x <= maxX; x++) yield [x, minY];
+  // Right inner column (excluding corners)
+  for (let y = minY + 1; y <= maxY - 1; y++) yield [maxX, y];
+  // Bottom inner row
+  if (maxY > minY) for (let x = maxX; x >= minX; x--) yield [x, maxY];
+  // Left inner column (excluding corners)
+  if (maxX > minX) for (let y = maxY - 1; y >= minY + 1; y--) yield [minX, y];
+}
+
+function randomInnerPerimeterPositions(n: number): Array<{ tx: number; ty: number }> {
+  // Prefer inner ring; fall back to outer perimeter if not available
+  let ring = Array.from(innerPerimeterTiles(MAP_WIDTH, MAP_HEIGHT)).map(([tx, ty]) => ({ tx, ty }));
+  if (ring.length === 0) {
+    ring = Array.from(perimeterTiles(MAP_WIDTH, MAP_HEIGHT)).map(([tx, ty]) => ({ tx, ty }));
+  }
+  // Shuffle
+  for (let i = ring.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    const tmp = ring[i]; ring[i] = ring[j]; ring[j] = tmp;
+  }
+  return ring.slice(0, Math.max(0, Math.min(n, ring.length)));
+}
+
 // --- Internal per-connection input state
 
 interface InputState {
@@ -269,9 +302,9 @@ export class GameRoom {
     this.events.length = 0;
     this.deathAt.clear();
 
-    // Assign spawns on perimeter
+    // Assign spawns on inner perimeter (randomized each round)
     const playerIds = Array.from(this.room.players.keys());
-    const spawns = evenlySpacedPerimeterPositions(playerIds.length);
+    const spawns = randomInnerPerimeterPositions(playerIds.length);
     this.lastSpawns = [];
 
     for (let i = 0; i < playerIds.length; i++) {

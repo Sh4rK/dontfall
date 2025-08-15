@@ -96,6 +96,12 @@
       height: 100%; width: 0%;
       background: linear-gradient(90deg, #ffb3a4, #ff6b5e);
     }
+    #cooldownText {
+      position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%);
+      padding: 2px 6px; border-radius: 6px;
+      background: rgba(0,0,0,0.15); color: #223; font-weight: 700; font-size: 12px;
+      pointer-events: none;
+    }
     /* Join modal */
     .modal {
       position: absolute; inset: 0; display: none;
@@ -175,6 +181,7 @@
     <div id="cooldownBar">
       <div id="cooldownFill"></div>
     </div>
+    <div id="cooldownText">DASH</div>
 
     <div id="touchControls">
       <div id="joyArea"><div id="joyKnob"></div></div>

@@ -14,6 +14,7 @@ export class UI {
 
     this.cooldownBar = document.getElementById('cooldownBar');
     this.cooldownFill = document.getElementById('cooldownFill');
+    this.cooldownText = document.getElementById('cooldownText');
 
     // Join modal
     this.joinModal = document.getElementById('joinModal');
@@ -79,6 +80,18 @@ export class UI {
   setCooldownProgress(frac) {
     const f = clamp01(frac);
     this.cooldownFill.style.width = `${Math.round(f * 100)}%`;
+  }
+
+  setCooldownLabel(remainingMs) {
+    if (!this.cooldownText) return;
+    if (remainingMs <= 0) {
+      this.cooldownText.textContent = 'DASH READY';
+      this.cooldownText.style.color = '#2ecc71';
+    } else {
+      const s = Math.max(0, remainingMs) / 1000;
+      this.cooldownText.textContent = `Dash ${s.toFixed(1)}s`;
+      this.cooldownText.style.color = '#223';
+    }
   }
 
   // ----- Lobby -----

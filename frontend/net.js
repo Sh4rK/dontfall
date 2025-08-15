@@ -2,16 +2,18 @@
 
 import { applyServerConstants } from './constants.js';
 
-function now() { return performance.now(); }
+function nowEpoch() { return Date.now(); }           // epoch ms (aligns with server)
+function nowPerf() { return performance.now(); }     // high-res client timer for RTT
 
 class Net {
   constructor() {
     this.ws = null;
     this.connected = false;
     this.handlers = {};
-    this.timeOffset = 0; // serverTime - now()
+    this.timeOffset = 0; // serverTime - nowEpoch()
     this.pingMs = null;
     this.roomId = 'default';
+    this._clientPingTimer = null;
   }
 
   setHandlers(h) {
@@ -19,7 +21,7 @@ class Net {
   }
 
   getServerNow() {
-    return now() + this.timeOffset;
+    return nowEpoch() + this.timeOffset;
   }
 
   getPingMs() {
@@ -38,6 +40,11 @@ class Net {
 
       ws.onopen = () => {
         this.connected = true;
+        // client-initiated RTT pings every 5s using performance timer;
+        // server echoes these back in a "ping" with the same ts
+        this._clientPingTimer = setInterval(() => {
+          this._send({ type: 'pong', ts: nowPerf() });
+        }, 5000);
         resolve();
       };
 
@@ -52,6 +59,10 @@ class Net {
 
       ws.onclose = () => {
         this.connected = false;
+        if (this._clientPingTimer) {
+          clearInterval(this._clientPingTimer);
+          this._clientPingTimer = null;
+        }
         if (this.handlers.close) this.handlers.close();
       };
 
@@ -88,7 +99,7 @@ class Net {
 
   _updateTimeOffset(serverTime) {
     if (typeof serverTime !== 'number' || !isFinite(serverTime)) return;
-    const offset = serverTime - now();
+    const offset = serverTime - nowEpoch();
     // light smoothing
     this.timeOffset = this.timeOffset === 0 ? offset : (this.timeOffset * 0.9 + offset * 0.1);
   }
@@ -135,11 +146,11 @@ class Net {
       }
 
       case 'ping': {
-        // compute RTT and respond with pong
-        if (typeof msg.ts === 'number') {
-          const rtt = now() - msg.ts;
-          this.pingMs = Math.round(rtt);
-          this._send({ type: 'pong', ts: msg.ts });
+        // Compute RTT only for client-initiated pings (perf timer range),
+        // ignore server-epoch pings for RTT (they use Date.now()).
+        if (typeof msg.ts === 'number' && msg.ts < 1e12) {
+          const rtt = nowPerf() - msg.ts;
+          this.pingMs = Math.max(0, Math.round(rtt));
         }
         if (this.handlers.ping) this.handlers.ping(msg);
         break;

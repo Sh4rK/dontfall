@@ -362,7 +362,12 @@ function handleClientMessage(ctx: RoomContext, client: ClientConn, msg: ClientMe
     }
 
     case "pong": {
-      // Optional: latency computation; currently no-op
+      // Echo back to allow client RTT measurement using performance timer
+      try {
+        client.ws.send(JSON.stringify({ type: "ping", ts: msg.ts }));
+      } catch {
+        // ignore
+      }
       break;
     }
   }
