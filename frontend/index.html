@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Don't Fall</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg-top: #e8f1ff;
+      --bg-bottom: #fff7f0;
+      --panel-bg: rgba(255,255,255,0.85);
+      --text: #223;
+      --accent: #e74c3c;
+      --ok: #2ecc71;
+      --warn: #f1c40f;
+      --muted: #889;
+    }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+      color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+      overflow: hidden;
+    }
+    #game {
+      position: absolute; inset: 0;
+    }
+    /* UI root */
+    #ui {
+      position: absolute; inset: 0; pointer-events: none;
+    }
+    /* Top bar */
+    #topBar {
+      pointer-events: auto;
+      position: absolute; top: 8px; left: 8px; right: 8px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    #statusText {
+      background: var(--panel-bg);
+      border-radius: 8px;
+      padding: 6px 10px;
+      color: var(--muted);
+    }
+    #readyBtn {
+      margin-left: auto;
+      border: 0; border-radius: 8px; padding: 8px 12px;
+      background: #dfe8ff; color: #224; cursor: pointer; font-weight: 600;
+    }
+    #readyBtn.ready {
+      background: var(--ok); color: white;
+    }
+    /* Lobby panel */
+    #lobbyPanel {
+      pointer-events: auto;
+      position: absolute; top: 44px; left: 8px; width: 280px;
+      background: var(--panel-bg);
+      border-radius: 10px; padding: 10px 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+    #lobbyPanel h2 {
+      margin: 0 0 8px 0; font-size: 16px;
+    }
+    #playerList {
+      list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow: auto;
+    }
+    #playerList li {
+      display: flex; gap: 6px; align-items: center; padding: 6px 4px; border-bottom: 1px solid rgba(0,0,0,0.06);
+    }
+    .dot {
+      width: 12px; height: 12px; border-radius: 50%;
+      border: 1px solid rgba(0,0,0,0.15);
+      flex: 0 0 auto;
+    }
+    .you {
+      margin-left: auto; font-size: 11px; color: var(--muted);
+    }
+    .readyTag {
+      margin-left: 6px; font-size: 11px; color: var(--ok); font-weight: 600;
+    }
+    /* Countdown overlay */
+    #countdown {
+      position: absolute; inset: 0; display: none;
+      align-items: center; justify-content: center;
+      font-size: 72px; font-weight: 800; color: var(--accent);
+      text-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      pointer-events: none;
+    }
+    /* Dash cooldown bar */
+    #cooldownBar {
+      position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+      width: 320px; height: 10px; background: rgba(0,0,0,0.15); border-radius: 6px; overflow: hidden;
+      pointer-events: none;
+    }
+    #cooldownFill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #ffb3a4, #ff6b5e);
+    }
+    /* Join modal */
+    .modal {
+      position: absolute; inset: 0; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.25);
+      pointer-events: auto;
+    }
+    .modal .card {
+      background: var(--panel-bg);
+      padding: 16px; border-radius: 12px; width: 320px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    }
+    .modal h3 { margin: 0 0 10px 0; }
+    .field { margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input[type="text"] {
+      width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(0,0,0,0.15); background: white;
+    }
+    .color {
+      width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(0,0,0,0.2); cursor: pointer;
+    }
+    .color.selected { outline: 3px solid #333; }
+    .actions { display: flex; gap: 8px; margin-top: 10px; }
+    button.primary {
+      border: 0; border-radius: 8px; padding: 8px 12px; background: #4c7fff; color: white; cursor: pointer; font-weight: 700;
+    }
+    /* Leaderboard modal */
+    #leaderboardModal .card { width: 420px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 6px 4px; border-bottom: 1px solid rgba(0,0,0,0.08); text-align: left; }
+    th { font-size: 12px; color: var(--muted); }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+
+  <div id="ui">
+    <div id="topBar">
+      <div id="statusText">Room: -, Ping: -, FPS: -</div>
+      <button id="readyBtn" title="Toggle Ready (Lobby)">Ready</button>
+    </div>
+
+    <div id="lobbyPanel">
+      <h2>Lobby</h2>
+      <ul id="playerList"></ul>
+    </div>
+
+    <div id="countdown">3</div>
+
+    <div id="cooldownBar">
+      <div id="cooldownFill"></div>
+    </div>
+  </div>
+
+  <!-- Join modal -->
+  <div id="joinModal" class="modal" role="dialog" aria-modal="true">
+    <div class="card">
+      <h3>Join Game</h3>
+      <div class="field">
+        <label for="nameInput">Name</label>
+        <input id="nameInput" type="text" maxlength="20" placeholder="Your name" />
+      </div>
+      <div class="field">
+        <label>Color</label>
+        <div id="colorRow" class="row"></div>
+      </div>
+      <div class="actions">
+        <button id="joinBtn" class="primary">Join</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaderboard modal -->
+  <div id="leaderboardModal" class="modal" role="dialog" aria-modal="true">
+    <div class="card">
+      <h3>Leaderboard</h3>
+      <table>
+        <thead>
+          <tr><th>Player</th><th>Wins</th><th>Games</th><th>Avg Place</th></tr>
+        </thead>
+        <tbody id="leaderboardBody"></tbody>
+      </table>
+      <div class="actions">
+        <button id="leaderboardClose" class="primary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
