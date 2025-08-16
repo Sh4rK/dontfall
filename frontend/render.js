@@ -134,7 +134,7 @@ export class Renderer {
 
   // Ensure player mesh exists and color set
   ensurePlayer(id, colorHex = '#cccccc', constants) {
-    let p = this.players.get(id);
+    const p = this.players.get(id);
     if (p) {
       // update color if changed
       const desired = new THREE.Color(colorHex);

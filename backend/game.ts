@@ -96,7 +96,8 @@ function *perimeterTiles(width: number, height: number): Generator<[number, numb
   if (width > 1) for (let y = height - 2; y >= 1; y--) yield [0, y];
 }
 
-function evenlySpacedPerimeterPositions(n: number): Array<{ tx: number; ty: number }> {
+// Not used currently, distributes players evenly along perimeter.
+function _evenlySpacedPerimeterPositions(n: number): Array<{ tx: number; ty: number }> {
   const perim: Array<{ tx: number; ty: number }> = Array.from(perimeterTiles(MAP_WIDTH, MAP_HEIGHT)).map(([tx, ty]) => ({ tx, ty }));
   const m = perim.length || 1;
   const out: Array<{ tx: number; ty: number }> = [];
@@ -231,7 +232,6 @@ export class GameRoom {
     seq: number,
     move: Vec2,
     dash: boolean,
-    recvTimeMs: number,
   ) {
     const p = this.room.players.get(playerId);
     if (!p) return;
@@ -256,7 +256,6 @@ export class GameRoom {
 
     // Record on Player for reconciliation
     p.lastInputSeq = seq;
-    // recvTimeMs currently unused; could be used for input rate monitoring or latency metrics
   }
 
   // --- Round control
@@ -335,7 +334,7 @@ export class GameRoom {
     this.room.roundState = "inRound";
   }
 
-  private endRound(now: number): { placements: Array<{ id: string; place: number }>; winnerId?: string } {
+  private endRound(): { placements: Array<{ id: string; place: number }>; winnerId?: string } {
     const players = Array.from(this.room.players.values());
     const alive = players.filter((p) => p.alive);
     const dead = players.filter((p) => !p.alive);
@@ -457,8 +456,6 @@ export class GameRoom {
       const t = this.room.tiles[idx];
       if (t.state === "shaking" && (t.fallAtMs ?? Infinity) <= now) {
         t.state = "fallen";
-        // remove shakeStartMs to indicate final state
-        t.shakeStartMs = t.shakeStartMs;
         this.events.push({ kind: "tile_fall", idx });
         this.tileDeltaIdx.add(idx);
       }

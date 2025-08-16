@@ -24,7 +24,7 @@ const container = document.getElementById('game');
 const renderer = new Renderer(container);
 const input = new Input();
 // Initialize touch controls (auto-enabled on coarse pointers)
-const touch = new TouchControls(input);
+const _touch = new TouchControls(input);
 
 const urlParams = new URLSearchParams(location.search);
 const roomId = urlParams.get('roomId')?.trim() || 'default';
@@ -45,7 +45,7 @@ const deathAt = new Map();
 // Local prediction state
 let seq = 0;
 const pendingInputs = []; // [{seq, tsClient, move, dash}]
-let local = {
+const local = {
   pos: { x: 0, y: 0 },
   vel: { x: 0, y: 0 },
   alive: false,
@@ -61,7 +61,7 @@ let lastAckSeq = 0;
 let lastWinnerId = null;
 
 // Tiles visual model (for shake/fall)
-let tiles = {
+const tiles = {
   width: 15, height: 15, count: 225,
   state: new Uint8Array(225),         // 0 solid, 1 shaking, 2 fallen
   shakeStart: new Float64Array(225),  // serverTime ms
@@ -70,7 +70,7 @@ let tiles = {
 
 // FPS
 let fps = 0;
-let _fpsAccum = 0, _fpsFrames = 0, _fpsLast = now();
+let fpsAccum = 0, fpsLast = now();
 
 // ===== Client Simulation (light) =====
 function simStep(state, move, dash, tNow, dt) {
@@ -315,10 +315,10 @@ function raf() {
 
   // FPS
   const tNow = now();
-  _fpsAccum += 1;
-  if (tNow - _fpsLast >= 500) {
-    fps = Math.round((_fpsAccum * 1000) / (tNow - _fpsLast));
-    _fpsAccum = 0; _fpsLast = tNow;
+  fpsAccum += 1;
+  if (tNow - fpsLast >= 500) {
+    fps = Math.round((fpsAccum * 1000) / (tNow - fpsLast));
+    fpsAccum = 0; fpsLast = tNow;
   }
 
   // Countdown UI
@@ -355,7 +355,7 @@ function raf() {
 
   // Remotes
   const targetT = nowSrv - (C.INTERP_BUFFER_MS || 100);
-  for (const [id, buf] of interp) {
+  for (const [id, _buf] of interp) {
     if (id === selfId) continue;
     const s = interpolateFor(id, targetT);
     if (!s) continue;

@@ -28,7 +28,7 @@ class Net {
     return this.pingMs;
   }
 
-  async connect(roomId = 'default') {
+  connect(roomId = 'default') {
     this.roomId = roomId;
     const loc = window.location;
     const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';

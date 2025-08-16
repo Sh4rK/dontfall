@@ -1,6 +1,3 @@
-declare const Deno: any;
-// Deno HTTP + WebSocket server for Don't Fall
-
 import {
   CONSTANTS,
   COUNTDOWN_SECONDS,
@@ -84,7 +81,7 @@ interface RoomContext {
 const rooms = new Map<string, RoomContext>();
 
 function getOrCreateRoom(roomId: string): RoomContext {
-  let ctx = rooms.get(roomId);
+  const ctx = rooms.get(roomId);
   if (ctx) return ctx;
 
   const room = new GameRoom(roomId);
@@ -132,7 +129,7 @@ function stopLoopsIfNeeded(ctx: RoomContext) {
   }
 }
 
-function handleRoomTransitions(ctx: RoomContext, now: number) {
+function handleRoomTransitions(ctx: RoomContext) {
   const rs = ctx.room.state.roundState;
   if (ctx.lastRoundState !== rs) {
     // countdown -> inRound: send round_start
