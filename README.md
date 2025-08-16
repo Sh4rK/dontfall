@@ -1,67 +1,70 @@
-# Don't Fall — Backend
+# Don't Fall
 
-Deno HTTP + WebSocket backend implementing the authoritative game server per SPEC.
+Real-time, server-authoritative multiplayer arena game. Move across a floating grid of tiles that shake then fall; dash to bump opponents off the map. Last player alive wins. Backend is Deno; frontend is HTML + ES Modules with Three.js. 2–8 players per room, no bundlers required.
 
-- Port: 8000
-- Static files served from ./frontend (index.html expected)
-- WebSocket endpoint: /ws?roomId=<id> (defaults to "default")
-- Health: GET /health
-
-## Run
+## Quickstart
 
 Requirements: Deno (latest stable).
 
-Start server:
+Start the server:
+
 ```sh
 deno run -A backend/server.ts
 ```
 
-Open http://localhost:8000/
+Then open http://localhost:8000/ in a browser. Optionally pass a room with ?roomId=custom. Health check at /health. WebSocket endpoint at /ws?roomId=.
 
-## Protocol (JSON over WebSocket)
+Controls: Arrow keys to move, Space to dash.
 
-Client → Server:
-- join: { type: "join", name: string, color?: string }
-- ready: { type: "ready", ready: boolean }
-- input: { type: "input", seq: number, ts: number, move: { x: -1..1, y: -1..1 }, dash: boolean }
-- pong: { type: "pong", ts: number }
+## Backend (brief)
 
-Server → Client:
-- welcome: { type: "welcome", playerId, roomId, constants, mapSeed, mapSize }
-- lobby_state: { type: "lobby_state", players: [{ id, name, color, ready }], minPlayers, maxPlayers, allReady }
-- countdown: { type: "countdown", seconds, serverTime }
-- round_start: { type: "round_start", spawnAssignments: [{ id, tx, ty }], mapSeed }
-- state: { type: "state", tick, serverTime, players, tiles, events, lastAckSeq? }
-- round_over: { type: "round_over", placements, winnerId? }
-- leaderboard: { type: "leaderboard", entries }
-- ping: { type: "ping", ts }
+Single-process, server-authoritative simulation that also serves the static frontend.
+- HTTP: serves files from [`frontend/`](frontend) with entry at [`frontend/index.html`](frontend/index.html)
+- WebSocket: upgrade at GET /ws?roomId= for gameplay
+- Health: GET /health
+- Loops: fixed tick TICK_RATE for simulation and STATE_SNAPSHOT_RATE for snapshots
 
-Messages are validated with Zod (URL import). VS Code TS may show transient type hints until Deno fetches modules at runtime.
+Key files:
+- [`backend/server.ts`](backend/server.ts)
+- [`backend/game.ts`](backend/game.ts)
+- [`backend/messages.ts`](backend/messages.ts)
+- [`backend/types.ts`](backend/types.ts)
+- [`backend/config.ts`](backend/config.ts)
+- [`backend/leaderboard.ts`](backend/leaderboard.ts)
+- [`backend/utils/time.ts`](backend/utils/time.ts)
 
-## Game loop
+See details in [`backend/README.md`](backend/README.md).
 
-- TICK_RATE = 30 Hz authoritative simulation
-- STATE_SNAPSHOT_RATE = 10 Hz broadcasts (tiles as deltas, events stream)
-- Lobby → Countdown (3s) → InRound → RoundOver → back to Lobby (auto)
+## Frontend (brief)
 
-Input rate limiting: 60/s per client.
+Single-page client using Three.js, ES modules, and light prediction/reconciliation. Connects via WebSocket to the backend.
 
-## Dev
+Key files:
+- [`frontend/index.html`](frontend/index.html)
+- [`frontend/main.js`](frontend/main.js)
+- [`frontend/net.js`](frontend/net.js)
+- [`frontend/render.js`](frontend/render.js)
+- [`frontend/input.js`](frontend/input.js)
+- [`frontend/ui.js`](frontend/ui.js)
+- [`frontend/touch.js`](frontend/touch.js)
+- [`frontend/constants.js`](frontend/constants.js)
 
-Run tests:
+See details in [`frontend/README.md`](frontend/README.md).
+
+## Project structure
+
+- [`backend/`](backend) — HTTP + WebSocket server, simulation, validation, leaderboard
+- [`frontend/`](frontend) — HTML + ES modules client
+- [`SPEC.md`](SPEC.md) — product and technical specification
+- [`README.md`](README.md) — this document
+
+## Development
+
+- Run tests:
+
 ```sh
 deno test -A backend/game_test.ts
 ```
 
-Key modules:
-- backend/config.ts — named constants
-- backend/types.ts — core types
-- backend/messages.ts — Zod schemas
-- backend/utils/time.ts — fixed-rate scheduler
-- backend/leaderboard.ts — in-memory leaderboard
-- backend/game.ts — simulation (players, tiles, dashes, collisions, round flow)
-- backend/server.ts — HTTP + WS, multi-room, loops, broadcasts
-
-Notes:
-- Static frontend is optional for backend testing; place files under ./frontend or hit /health to verify uptime.
-- Multi-room supported via roomId query param. Capacity enforced per room.
+- Server constants live in [`backend/config.ts`](backend/config.ts) and are mirrored client-side in [`frontend/constants.js`](frontend/constants.js). The server remains authoritative.
+- Edit frontend files and refresh the page; no build step needed.
